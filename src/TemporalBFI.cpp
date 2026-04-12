@@ -1,0 +1,388 @@
+#include "TemporalBFI.h"
+
+namespace TemporalBFI {
+
+// ============================================================================
+// LUT Management
+// ============================================================================
+
+void SolverRuntime::attachLUTs(uint8_t* valueLUT, uint8_t* bfiLUT,
+                               uint8_t* floorLUT, uint16_t* outputQ16LUT,
+                               uint16_t lutSize)
+{
+    m_valueLUT = valueLUT;
+    m_bfiLUT = bfiLUT;
+    m_floorLUT = floorLUT;
+    m_outputQ16LUT = outputQ16LUT;
+    m_lutSize = lutSize;
+}
+
+void SolverRuntime::precompute(SolverFn fn)
+{
+    if (!fn || !m_valueLUT || !m_bfiLUT || m_lutSize < 2u) return;
+
+    for (uint8_t ch = 0; ch < 4; ++ch)
+    {
+        const size_t offset = (size_t)ch * (size_t)m_lutSize;
+        for (size_t i = 0; i < m_lutSize; ++i)
+        {
+            const uint16_t q16 = (uint16_t)(((uint32_t)i * 65535u) / (uint32_t)(m_lutSize - 1u));
+            const auto s = fn(q16, ch, m_cfg);
+            m_valueLUT[offset + i] = s.value;
+            m_bfiLUT[offset + i] = s.bfi;
+            if (m_floorLUT) m_floorLUT[offset + i] = s.lowerValue;
+            if (m_outputQ16LUT) m_outputQ16LUT[offset + i] = s.outputQ16;
+        }
+        m_valueLUT[offset] = 0;
+        m_bfiLUT[offset] = 0;
+        if (m_floorLUT) m_floorLUT[offset] = 0;
+        if (m_outputQ16LUT) m_outputQ16LUT[offset] = 0;
+    }
+}
+
+void SolverRuntime::loadPrecomputed(const uint8_t* srcValue, const uint8_t* srcBfi,
+                                    const uint8_t* srcFloor, const uint16_t* srcOutputQ16)
+{
+    if (!m_valueLUT || !m_bfiLUT || m_lutSize < 2u) return;
+    const size_t totalEntries = (size_t)4 * (size_t)m_lutSize;
+
+    memcpy(m_valueLUT, srcValue, totalEntries);
+    memcpy(m_bfiLUT, srcBfi, totalEntries);
+    if (m_floorLUT && srcFloor)
+        memcpy(m_floorLUT, srcFloor, totalEntries);
+    if (m_outputQ16LUT && srcOutputQ16)
+        memcpy(m_outputQ16LUT, srcOutputQ16, totalEntries * sizeof(uint16_t));
+}
+
+// ============================================================================
+// Solver (runtime hot path)
+// ============================================================================
+
+size_t SolverRuntime::solverLutIndex(uint16_t q16) const
+{
+    return lutIndexForSize(q16, m_lutSize);
+}
+
+EncodedState SolverRuntime::solve(uint16_t q16, uint8_t channel) const
+{
+    EncodedState out{};
+    if (q16 == 0 || !m_valueLUT || !m_bfiLUT || m_lutSize == 0)
+        return out;
+
+    const size_t idx = solverLutIndex(q16);
+    const size_t offset = (size_t)channel * (size_t)m_lutSize + idx;
+
+    out.value = m_valueLUT[offset];
+    out.bfi = m_bfiLUT[offset];
+    out.lowerValue = m_floorLUT ? m_floorLUT[offset] : out.value;
+    out.outputQ16 = m_outputQ16LUT ? m_outputQ16LUT[offset] : 0;
+    out.ladderIndex = (uint16_t)idx;
+    return out;
+}
+
+// ============================================================================
+// Transfer Curve
+// ============================================================================
+
+void SolverRuntime::setTransferCurve(const uint16_t* curveR, const uint16_t* curveG,
+                                     const uint16_t* curveB, const uint16_t* curveW,
+                                     uint16_t bucketCount)
+{
+    m_curveR = curveR;
+    m_curveG = curveG;
+    m_curveB = curveB;
+    m_curveW = curveW;
+    m_curveBucketCount = bucketCount;
+}
+
+void SolverRuntime::setTransferCurveEnabled(bool enabled)
+{
+    m_transferCurveEnabled = enabled;
+}
+
+uint16_t SolverRuntime::applyTransferCurve(uint16_t q16, uint8_t channel) const
+{
+    if (!m_transferCurveEnabled || m_curveBucketCount == 0) return q16;
+
+    const uint16_t* curve = nullptr;
+    switch (channel)
+    {
+        case 0: curve = m_curveG; break;
+        case 1: curve = m_curveR; break;
+        case 2: curve = m_curveB; break;
+        default: curve = m_curveW; break;
+    }
+    if (!curve) return q16;
+
+    const size_t idx = lutIndexForSize(q16, m_curveBucketCount);
+    return curve[idx];
+}
+
+// ============================================================================
+// Input Calibration
+// ============================================================================
+
+void SolverRuntime::setCalibrationFunction(CalibrationFn fn)
+{
+    m_calibrationFn = fn;
+}
+
+void SolverRuntime::setCalibrationEnabled(bool enabled)
+{
+    m_calibrationEnabled = enabled;
+}
+
+uint16_t SolverRuntime::applyCalibration(uint16_t q16, uint8_t channel) const
+{
+    if (!m_calibrationEnabled || !m_calibrationFn) return q16;
+    return m_calibrationFn(q16, channel);
+}
+
+// ============================================================================
+// RGBW Extraction
+// ============================================================================
+
+void SolverRuntime::setWhiteLimit(uint8_t limit)
+{
+    m_whiteLimit = limit;
+}
+
+RgbwTargets SolverRuntime::extractRgbw(uint16_t rQ16, uint16_t gQ16, uint16_t bQ16) const
+{
+    // Apply calibration to each channel (solver channel map: 0=G, 1=R, 2=B, 3=W).
+    const uint16_t rCal = applyCalibration(rQ16, 1);
+    const uint16_t gCal = applyCalibration(gQ16, 0);
+    const uint16_t bCal = applyCalibration(bQ16, 2);
+
+    uint16_t wExtract = min3U16(rCal, gCal, bCal);
+
+    // Apply white limit (calibrated domain).
+    const uint16_t whiteLimitQ16 = scale8ToQ16(m_whiteLimit);
+    const uint16_t whiteLimitCal = applyCalibration(whiteLimitQ16, 3);
+    if (wExtract > whiteLimitCal)
+        wExtract = whiteLimitCal;
+
+    RgbwTargets out;
+    out.rQ16 = (rCal > wExtract) ? uint16_t(rCal - wExtract) : 0;
+    out.gQ16 = (gCal > wExtract) ? uint16_t(gCal - wExtract) : 0;
+    out.bQ16 = (bCal > wExtract) ? uint16_t(bCal - wExtract) : 0;
+    out.wQ16 = wExtract;
+    return out;
+}
+
+RgbwTargets SolverRuntime::applyWhiteLimit(uint16_t rQ16, uint16_t gQ16,
+                                           uint16_t bQ16, uint16_t wQ16) const
+{
+    const uint16_t whiteLimitQ16 = scale8ToQ16(m_whiteLimit);
+    const uint16_t whiteLimitCal = applyCalibration(whiteLimitQ16, 3);
+    if (wQ16 > whiteLimitCal)
+        wQ16 = whiteLimitCal;
+
+    RgbwTargets out;
+    out.rQ16 = rQ16;
+    out.gQ16 = gQ16;
+    out.bQ16 = bQ16;
+    out.wQ16 = wQ16;
+    return out;
+}
+
+// ============================================================================
+// Pixel Commit
+// ============================================================================
+
+void SolverRuntime::commitPixelRGBW(
+    uint8_t* upperFrame, uint8_t* floorFrame,
+    uint8_t* bfiMapG, uint8_t* bfiMapR,
+    uint8_t* bfiMapB, uint8_t* bfiMapW,
+    uint16_t pixelIndex,
+    const EncodedState& g, const EncodedState& r,
+    const EncodedState& b, const EncodedState& w)
+{
+    const uint32_t off = (uint32_t)pixelIndex * 4u;
+    upperFrame[off + 0] = g.value;
+    upperFrame[off + 1] = r.value;
+    upperFrame[off + 2] = b.value;
+    upperFrame[off + 3] = w.value;
+
+    if (floorFrame)
+    {
+        floorFrame[off + 0] = g.lowerValue;
+        floorFrame[off + 1] = r.lowerValue;
+        floorFrame[off + 2] = b.lowerValue;
+        floorFrame[off + 3] = w.lowerValue;
+    }
+
+    bfiMapG[pixelIndex] = g.bfi;
+    bfiMapR[pixelIndex] = r.bfi;
+    bfiMapB[pixelIndex] = b.bfi;
+    bfiMapW[pixelIndex] = w.bfi;
+}
+
+void SolverRuntime::commitPixelRGB(
+    uint8_t* upperFrame, uint8_t* floorFrame,
+    uint8_t* bfiMapG, uint8_t* bfiMapR,
+    uint8_t* bfiMapB,
+    uint16_t pixelIndex,
+    const EncodedState& g, const EncodedState& r,
+    const EncodedState& b)
+{
+    const uint32_t off = (uint32_t)pixelIndex * 3u;
+    upperFrame[off + 0] = g.value;
+    upperFrame[off + 1] = r.value;
+    upperFrame[off + 2] = b.value;
+
+    if (floorFrame)
+    {
+        floorFrame[off + 0] = g.lowerValue;
+        floorFrame[off + 1] = r.lowerValue;
+        floorFrame[off + 2] = b.lowerValue;
+    }
+
+    bfiMapG[pixelIndex] = g.bfi;
+    bfiMapR[pixelIndex] = r.bfi;
+    bfiMapB[pixelIndex] = b.bfi;
+}
+
+// ============================================================================
+// BFI Rendering
+// ============================================================================
+
+void SolverRuntime::renderSubpixelBFI_RGBW(
+    const uint8_t* upperFrame, const uint8_t* floorFrame,
+    const uint8_t* bfiMapG, const uint8_t* bfiMapR,
+    const uint8_t* bfiMapB, const uint8_t* bfiMapW,
+    uint8_t* displayBuffer, uint16_t pixelCount,
+    uint8_t phase)
+{
+    const uint8_t phaseBit = (uint8_t)(1u << (phase & 0x07u));
+
+    const uint8_t* src = upperFrame;
+    const uint8_t* floor = floorFrame;
+    uint8_t* dst = displayBuffer;
+
+    for (uint16_t i = 0; i < pixelCount; ++i)
+    {
+        dst[0] = (PHASE_EMIT_MASK[clampBfi(bfiMapG[i])] & phaseBit) ? src[0] : (floor ? floor[0] : 0);
+        dst[1] = (PHASE_EMIT_MASK[clampBfi(bfiMapR[i])] & phaseBit) ? src[1] : (floor ? floor[1] : 0);
+        dst[2] = (PHASE_EMIT_MASK[clampBfi(bfiMapB[i])] & phaseBit) ? src[2] : (floor ? floor[2] : 0);
+        dst[3] = (PHASE_EMIT_MASK[clampBfi(bfiMapW[i])] & phaseBit) ? src[3] : (floor ? floor[3] : 0);
+
+        src += 4;
+        if (floor) floor += 4;
+        dst += 4;
+    }
+}
+
+void SolverRuntime::renderSubpixelBFI_RGB(
+    const uint8_t* upperFrame, const uint8_t* floorFrame,
+    const uint8_t* bfiMapG, const uint8_t* bfiMapR,
+    const uint8_t* bfiMapB,
+    uint8_t* displayBuffer, uint16_t pixelCount,
+    uint8_t phase)
+{
+    const uint8_t phaseBit = (uint8_t)(1u << (phase & 0x07u));
+
+    const uint8_t* src = upperFrame;
+    const uint8_t* floor = floorFrame;
+    uint8_t* dst = displayBuffer;
+
+    for (uint16_t i = 0; i < pixelCount; ++i)
+    {
+        dst[0] = (PHASE_EMIT_MASK[clampBfi(bfiMapG[i])] & phaseBit) ? src[0] : (floor ? floor[0] : 0);
+        dst[1] = (PHASE_EMIT_MASK[clampBfi(bfiMapR[i])] & phaseBit) ? src[1] : (floor ? floor[1] : 0);
+        dst[2] = (PHASE_EMIT_MASK[clampBfi(bfiMapB[i])] & phaseBit) ? src[2] : (floor ? floor[2] : 0);
+
+        src += 3;
+        if (floor) floor += 3;
+        dst += 3;
+    }
+}
+
+// ============================================================================
+// LUT Header Dump
+// ============================================================================
+
+static void dumpLUTU8(Print& out, const char* name, const uint8_t* lut,
+                      uint16_t lutSize, uint8_t channels)
+{
+    out.print("static const uint8_t ");
+    out.print(name);
+    out.print("[4][");
+    out.print((unsigned)lutSize);
+    out.println("] PROGMEM = {");
+    for (uint8_t ch = 0; ch < channels; ++ch)
+    {
+        out.println("  {");
+        const size_t offset = (size_t)ch * (size_t)lutSize;
+        for (size_t i = 0; i < lutSize; ++i)
+        {
+            if ((i % 16u) == 0u) out.print("    ");
+            out.print(lut[offset + i]);
+            if (i + 1u != lutSize) out.print(", ");
+            if ((i % 16u) == 15u) out.println();
+        }
+        out.println("  },");
+    }
+    out.println("};");
+    out.println();
+}
+
+static void dumpLUTU16(Print& out, const char* name, const uint16_t* lut,
+                       uint16_t lutSize, uint8_t channels)
+{
+    out.print("static const uint16_t ");
+    out.print(name);
+    out.print("[4][");
+    out.print((unsigned)lutSize);
+    out.println("] PROGMEM = {");
+    for (uint8_t ch = 0; ch < channels; ++ch)
+    {
+        out.println("  {");
+        const size_t offset = (size_t)ch * (size_t)lutSize;
+        for (size_t i = 0; i < lutSize; ++i)
+        {
+            if ((i % 12u) == 0u) out.print("    ");
+            out.print(lut[offset + i]);
+            if (i + 1u != lutSize) out.print(", ");
+            if ((i % 12u) == 11u) out.println();
+        }
+        out.println("  },");
+    }
+    out.println("};");
+    out.println();
+}
+
+void SolverRuntime::dumpLUTHeader(Print& out) const
+{
+    out.println("// Auto-generated precomputed solver LUTs");
+    out.println("// Save as solver_precomputed_luts.h, build with USE_PRECOMPUTED_LUTS");
+    out.println("#pragma once");
+    out.println("#include <Arduino.h>");
+    out.println();
+    out.println("namespace TemporalBFIPrecomputedSolverLUTs {");
+    out.print("static constexpr uint8_t SOLVER_FIXED_BFI_LEVELS = ");
+    out.print((unsigned)SOLVER_FIXED_BFI_LEVELS);
+    out.println(";");
+    out.print("static constexpr uint32_t SOLVER_LUT_SIZE = ");
+    out.print((unsigned long)m_lutSize);
+    out.println("u;");
+    out.println();
+    out.println("#define TEMPORAL_BFI_PRECOMPUTED_HAS_LUT_SIZE 1");
+    if (m_floorLUT)
+        out.println("#define TEMPORAL_BFI_PRECOMPUTED_HAS_FLOOR_LUT 1");
+    out.println();
+
+    if (m_bfiLUT)
+        dumpLUTU8(out, "solverBFILUT", m_bfiLUT, m_lutSize, 4);
+    if (m_valueLUT)
+        dumpLUTU8(out, "solverValueLUT", m_valueLUT, m_lutSize, 4);
+    if (m_floorLUT)
+        dumpLUTU8(out, "solverValueFloorLUT", m_floorLUT, m_lutSize, 4);
+    if (m_outputQ16LUT)
+        dumpLUTU16(out, "solverOutputQ16LUT", m_outputQ16LUT, m_lutSize, 4);
+
+    out.println("} // namespace TemporalBFIPrecomputedSolverLUTs");
+    out.println();
+}
+
+} // namespace TemporalBFI

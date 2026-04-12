@@ -1,0 +1,9 @@
+{
+  "name": "TemporalBFI",
+  "version": "0.8.0",
+  "description": "Temporal rendering framework with calibration and temporal ladders.",
+  "frameworks": [
+    "arduino"
+  ],
+  "platforms": "*"
+}
