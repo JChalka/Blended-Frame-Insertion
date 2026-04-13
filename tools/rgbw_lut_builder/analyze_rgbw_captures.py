@@ -12,9 +12,11 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = SCRIPT_DIR.parents[3]  # rgbw_lut_builder → tools → TemporalBFI → lib → project root
 
-DEFAULT_INPUT_DIR = Path(r"c:\Users\joey1\Documents\PlatformIO\Projects\hyperhdrcalibrationbfi\tools\v15\patch captures")
-DEFAULT_OUTPUT_DIR = Path(r"c:\Users\joey1\Documents\PlatformIO\Projects\hyperhdrcalibrationbfi\tools\rgbw_capture_analysis\outputs")
+DEFAULT_INPUT_DIR = _PROJECT_ROOT / "tools" / "v15" / "patch captures"
+DEFAULT_OUTPUT_DIR = _PROJECT_ROOT / "tools" / "rgbw_capture_analysis" / "outputs"
 
 
 @dataclass(frozen=True)

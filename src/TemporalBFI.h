@@ -166,6 +166,81 @@ inline bool channelOnPhase(uint8_t bfi, uint8_t phase)
 }
 
 // ============================================================================
+// Packed BFI Map Helpers
+//
+// Nybble-pair encoding: 2 bytes per pixel.
+//   byte 0: (G << 4) | R       — "GR"
+//   byte 1: (B << 4) | W       — "BW"   (W = 0 for RGB-only)
+//
+// Each channel occupies 4 bits (values 0..15), supporting up to 16 BFI
+// levels.  With the current SOLVER_FIXED_BFI_LEVELS = 5 the valid range
+// is 0..4, leaving headroom for future expansion.
+//
+// Memory: 2 bytes/pixel vs 4 bytes/pixel (RGBW) or 3 bytes/pixel (RGB).
+// ============================================================================
+
+static constexpr uint16_t PACKED_BFI_BYTES_PER_PIXEL = 2u;
+
+inline void packBfi4(uint8_t* packed, uint16_t pixelIndex,
+                     uint8_t g, uint8_t r, uint8_t b, uint8_t w)
+{
+    const uint32_t off = (uint32_t)pixelIndex * PACKED_BFI_BYTES_PER_PIXEL;
+    packed[off + 0] = (uint8_t)((g << 4) | (r & 0x0Fu));
+    packed[off + 1] = (uint8_t)((b << 4) | (w & 0x0Fu));
+}
+
+inline void packBfi3(uint8_t* packed, uint16_t pixelIndex,
+                     uint8_t g, uint8_t r, uint8_t b)
+{
+    packBfi4(packed, pixelIndex, g, r, b, 0);
+}
+
+inline void unpackBfi4(const uint8_t* packed, uint16_t pixelIndex,
+                       uint8_t& g, uint8_t& r, uint8_t& b, uint8_t& w)
+{
+    const uint32_t off = (uint32_t)pixelIndex * PACKED_BFI_BYTES_PER_PIXEL;
+    const uint8_t gr = packed[off + 0];
+    const uint8_t bw = packed[off + 1];
+    g = (uint8_t)(gr >> 4);
+    r = (uint8_t)(gr & 0x0Fu);
+    b = (uint8_t)(bw >> 4);
+    w = (uint8_t)(bw & 0x0Fu);
+}
+
+inline void unpackBfi3(const uint8_t* packed, uint16_t pixelIndex,
+                       uint8_t& g, uint8_t& r, uint8_t& b)
+{
+    uint8_t w;
+    unpackBfi4(packed, pixelIndex, g, r, b, w);
+    (void)w;
+}
+
+inline uint8_t readPackedBfiChannel(const uint8_t* packed,
+                                    uint16_t pixelIndex, uint8_t channelGRBW)
+{
+    const uint32_t off = (uint32_t)pixelIndex * PACKED_BFI_BYTES_PER_PIXEL;
+    switch (channelGRBW) {
+        case 0: return (uint8_t)(packed[off + 0] >> 4);        // G
+        case 1: return (uint8_t)(packed[off + 0] & 0x0Fu);     // R
+        case 2: return (uint8_t)(packed[off + 1] >> 4);        // B
+        default: return (uint8_t)(packed[off + 1] & 0x0Fu);    // W
+    }
+}
+
+inline void writePackedBfiChannel(uint8_t* packed,
+                                  uint16_t pixelIndex, uint8_t channelGRBW,
+                                  uint8_t value)
+{
+    const uint32_t off = (uint32_t)pixelIndex * PACKED_BFI_BYTES_PER_PIXEL;
+    switch (channelGRBW) {
+        case 0: packed[off + 0] = (uint8_t)((value << 4) | (packed[off + 0] & 0x0Fu)); break;
+        case 1: packed[off + 0] = (uint8_t)((packed[off + 0] & 0xF0u) | (value & 0x0Fu)); break;
+        case 2: packed[off + 1] = (uint8_t)((value << 4) | (packed[off + 1] & 0x0Fu)); break;
+        default: packed[off + 1] = (uint8_t)((packed[off + 1] & 0xF0u) | (value & 0x0Fu)); break;
+    }
+}
+
+// ============================================================================
 // Derive solver LUT size from ladder data at compile time.
 // ============================================================================
 
@@ -268,6 +343,38 @@ public:
         const uint8_t* upperFrame, const uint8_t* floorFrame,
         const uint8_t* bfiMapG, const uint8_t* bfiMapR,
         const uint8_t* bfiMapB,
+        uint8_t* displayBuffer, uint16_t pixelCount,
+        uint8_t phase);
+
+    // ----- Packed BFI Pixel Commit -----
+    // These variants write BFI levels into a packed nybble-pair buffer
+    // (2 bytes/pixel) instead of separate per-channel arrays.
+
+    static void commitPixelRGBW_Packed(
+        uint8_t* upperFrame, uint8_t* floorFrame,
+        uint8_t* packedBfiMap,
+        uint16_t pixelIndex,
+        const EncodedState& g, const EncodedState& r,
+        const EncodedState& b, const EncodedState& w);
+
+    static void commitPixelRGB_Packed(
+        uint8_t* upperFrame, uint8_t* floorFrame,
+        uint8_t* packedBfiMap,
+        uint16_t pixelIndex,
+        const EncodedState& g, const EncodedState& r,
+        const EncodedState& b);
+
+    // ----- Packed BFI Rendering -----
+
+    static void renderSubpixelBFI_RGBW_Packed(
+        const uint8_t* upperFrame, const uint8_t* floorFrame,
+        const uint8_t* packedBfiMap,
+        uint8_t* displayBuffer, uint16_t pixelCount,
+        uint8_t phase);
+
+    static void renderSubpixelBFI_RGB_Packed(
+        const uint8_t* upperFrame, const uint8_t* floorFrame,
+        const uint8_t* packedBfiMap,
         uint8_t* displayBuffer, uint16_t pixelCount,
         uint8_t phase);
 

@@ -299,6 +299,119 @@ void SolverRuntime::renderSubpixelBFI_RGB(
 }
 
 // ============================================================================
+// Packed BFI Commit
+// ============================================================================
+
+void SolverRuntime::commitPixelRGBW_Packed(
+    uint8_t* upperFrame, uint8_t* floorFrame,
+    uint8_t* packedBfiMap,
+    uint16_t pixelIndex,
+    const EncodedState& g, const EncodedState& r,
+    const EncodedState& b, const EncodedState& w)
+{
+    const uint32_t off = (uint32_t)pixelIndex * 4u;
+    upperFrame[off + 0] = g.value;
+    upperFrame[off + 1] = r.value;
+    upperFrame[off + 2] = b.value;
+    upperFrame[off + 3] = w.value;
+
+    if (floorFrame)
+    {
+        floorFrame[off + 0] = g.lowerValue;
+        floorFrame[off + 1] = r.lowerValue;
+        floorFrame[off + 2] = b.lowerValue;
+        floorFrame[off + 3] = w.lowerValue;
+    }
+
+    packBfi4(packedBfiMap, pixelIndex, g.bfi, r.bfi, b.bfi, w.bfi);
+}
+
+void SolverRuntime::commitPixelRGB_Packed(
+    uint8_t* upperFrame, uint8_t* floorFrame,
+    uint8_t* packedBfiMap,
+    uint16_t pixelIndex,
+    const EncodedState& g, const EncodedState& r,
+    const EncodedState& b)
+{
+    const uint32_t off = (uint32_t)pixelIndex * 3u;
+    upperFrame[off + 0] = g.value;
+    upperFrame[off + 1] = r.value;
+    upperFrame[off + 2] = b.value;
+
+    if (floorFrame)
+    {
+        floorFrame[off + 0] = g.lowerValue;
+        floorFrame[off + 1] = r.lowerValue;
+        floorFrame[off + 2] = b.lowerValue;
+    }
+
+    packBfi3(packedBfiMap, pixelIndex, g.bfi, r.bfi, b.bfi);
+}
+
+// ============================================================================
+// Packed BFI Rendering
+// ============================================================================
+
+void SolverRuntime::renderSubpixelBFI_RGBW_Packed(
+    const uint8_t* upperFrame, const uint8_t* floorFrame,
+    const uint8_t* packedBfiMap,
+    uint8_t* displayBuffer, uint16_t pixelCount,
+    uint8_t phase)
+{
+    const uint8_t phaseBit = (uint8_t)(1u << (phase & 0x07u));
+
+    const uint8_t* src = upperFrame;
+    const uint8_t* floor = floorFrame;
+    uint8_t* dst = displayBuffer;
+    const uint8_t* pk = packedBfiMap;
+
+    for (uint16_t i = 0; i < pixelCount; ++i)
+    {
+        const uint8_t gr = pk[0];
+        const uint8_t bw = pk[1];
+
+        dst[0] = (PHASE_EMIT_MASK[clampBfi(gr >> 4)]       & phaseBit) ? src[0] : (floor ? floor[0] : 0);
+        dst[1] = (PHASE_EMIT_MASK[clampBfi(gr & 0x0Fu)]    & phaseBit) ? src[1] : (floor ? floor[1] : 0);
+        dst[2] = (PHASE_EMIT_MASK[clampBfi(bw >> 4)]       & phaseBit) ? src[2] : (floor ? floor[2] : 0);
+        dst[3] = (PHASE_EMIT_MASK[clampBfi(bw & 0x0Fu)]    & phaseBit) ? src[3] : (floor ? floor[3] : 0);
+
+        src += 4;
+        if (floor) floor += 4;
+        dst += 4;
+        pk += PACKED_BFI_BYTES_PER_PIXEL;
+    }
+}
+
+void SolverRuntime::renderSubpixelBFI_RGB_Packed(
+    const uint8_t* upperFrame, const uint8_t* floorFrame,
+    const uint8_t* packedBfiMap,
+    uint8_t* displayBuffer, uint16_t pixelCount,
+    uint8_t phase)
+{
+    const uint8_t phaseBit = (uint8_t)(1u << (phase & 0x07u));
+
+    const uint8_t* src = upperFrame;
+    const uint8_t* floor = floorFrame;
+    uint8_t* dst = displayBuffer;
+    const uint8_t* pk = packedBfiMap;
+
+    for (uint16_t i = 0; i < pixelCount; ++i)
+    {
+        const uint8_t gr = pk[0];
+        const uint8_t bw = pk[1];
+
+        dst[0] = (PHASE_EMIT_MASK[clampBfi(gr >> 4)]       & phaseBit) ? src[0] : (floor ? floor[0] : 0);
+        dst[1] = (PHASE_EMIT_MASK[clampBfi(gr & 0x0Fu)]    & phaseBit) ? src[1] : (floor ? floor[1] : 0);
+        dst[2] = (PHASE_EMIT_MASK[clampBfi(bw >> 4)]        & phaseBit) ? src[2] : (floor ? floor[2] : 0);
+
+        src += 3;
+        if (floor) floor += 3;
+        dst += 3;
+        pk += PACKED_BFI_BYTES_PER_PIXEL;
+    }
+}
+
+// ============================================================================
 // LUT Header Dump
 // ============================================================================
 

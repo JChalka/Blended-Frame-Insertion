@@ -1,6 +1,6 @@
 # TemporalBFI Build Report
 
-**9/9** environments built successfully.
+**10/10** environments built successfully.
 
 | Environment | Status | Flash | Flash Free | RAM1 | RAM1 Free | RAM2 | RAM2 Free |
 |-------------|--------|-------|------------|------|-----------|------|-----------|
@@ -13,5 +13,6 @@
 | rgbwNoExtractionDemo | SUCCESS | 106.0 KB | 1878.0 KB | 64.6 KB | 427.2 KB | 12.1 KB | 499.9 KB |
 | True16RGBWGradientDemo | SUCCESS | 106.0 KB | 1878.0 KB | 65.4 KB | 427.0 KB | 12.1 KB | 499.9 KB |
 | TemporalFastLEDDemo | SUCCESS | 127.0 KB | 1857.0 KB | 86.8 KB | 424.6 KB | 17.2 KB | 494.8 KB |
+| PackedBFIMapDemo | SUCCESS | 133.0 KB | 1851.0 KB | 92.5 KB | 392.8 KB | 12.1 KB | 499.9 KB |
 
 Target: **Teensy 4.0** (IMXRT1062) — 1984 KB Flash, 512 KB RAM1, 512 KB RAM2

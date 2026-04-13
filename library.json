@@ -1,7 +1,12 @@
 {
   "name": "TemporalBFI",
-  "version": "0.8.0",
+  "version": "8.1.0",
   "description": "Temporal rendering framework with calibration and temporal ladders.",
+  "authors": [
+    {"name": "JChalka (Duchess Sucellus)", "maintainer": true},
+    {"name": "Claude Opus 4.6", "maintainer": true},
+    {"name": "GPT 5.4", "maintainer": true}
+  ],
   "frameworks": [
     "arduino"
   ],

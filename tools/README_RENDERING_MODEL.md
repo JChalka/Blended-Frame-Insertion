@@ -2,7 +2,7 @@
 
 ## 1. Physical Rendering Model
 
-The temporal BFI (Blended Frame Insertion) system renders LED output using a phase-cycle architecture. Each display cycle consists of `cycle_length` phases (default 5, corresponding to `MAX_BFI_FRAMES + 1`). Within one cycle, a blend8 state distributes phases between two brightness levels:
+The HyperTeensy temporal BFI (Blended Frame Insertion) system renders LED output using a phase-cycle architecture. Each display cycle consists of `cycle_length` phases (default 5, corresponding to `MAX_BFI_FRAMES + 1`). Within one cycle, a blend8 state distributes phases between two brightness levels:
 
 - **(cycle_length − bfi)** phases display the **upper value** (ceiling)
 - **bfi** phases display the **lower value** (floor)
@@ -133,7 +133,7 @@ Early iterations added the synthesis prediction as one of N values in the median
 
 The 50/50 blend gives the physics model equal weight to all empirical evidence combined:
 
-$$\hat{C}_\text{metric} = \frac{1}{2} C_\text{synth} + \frac{1}{2} \operatorname{median}(C_\text{emp,1} \ldots C_\text{emp,k})$$
+$$\hat{C}_\text{metric} = \frac{1}{2} C_\text{synth} + \frac{1}{2} \text{median}(C_\text{emp,1} \ldots C_\text{emp,k})$$
 
 This ensures each consecutive `upper_value` gets a distinct predicted Y (since the fill8 anchors differ), while still allowing empirical axes to correct for LED non-linearities that the linear temporal model does not capture.
 
