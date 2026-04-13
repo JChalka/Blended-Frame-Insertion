@@ -2,7 +2,7 @@
 
 ## 1. Physical Rendering Model
 
-The HyperTeensy temporal BFI (Blended Frame Insertion) system renders LED output using a phase-cycle architecture. Each display cycle consists of `cycle_length` phases (default 5, corresponding to `MAX_BFI_FRAMES + 1`). Within one cycle, a blend8 state distributes phases between two brightness levels:
+The temporal BFI (Blended Frame Insertion) system renders LED output using a phase-cycle architecture. Each display cycle consists of `cycle_length` phases (default 5, corresponding to `MAX_BFI_FRAMES + 1`). Within one cycle, a blend8 state distributes phases between two brightness levels:
 
 - **(cycle_length − bfi)** phases display the **upper value** (ceiling)
 - **bfi** phases display the **lower value** (floor)
