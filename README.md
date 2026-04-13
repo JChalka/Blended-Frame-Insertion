@@ -80,6 +80,10 @@ void loop() {
 | `commitPixelRGB(...)` | Write encoded RGB state to frame/BFI buffers (static) |
 | `renderSubpixelBFI_RGBW(...)` | Render one BFI phase for RGBW pixels (static) |
 | `renderSubpixelBFI_RGB(...)` | Render one BFI phase for RGB pixels (static) |
+| `commitPixelRGBW_Packed(...)` | Write encoded RGBW state to frame buffers + packed BFI map (static) |
+| `commitPixelRGB_Packed(...)` | Write encoded RGB state to frame buffers + packed BFI map (static) |
+| `renderSubpixelBFI_RGBW_Packed(...)` | Render one BFI phase for RGBW pixels from packed BFI map (static) |
+| `renderSubpixelBFI_RGB_Packed(...)` | Render one BFI phase for RGB pixels from packed BFI map (static) |
 | `dumpLUTHeader(Serial)` | Emit embeddable PROGMEM header of current LUTs |
 
 ### Key Types
@@ -120,12 +124,15 @@ struct PolicyConfig {
 | [rgbwNoExtractionDemo](examples/rgbwNoExtractionDemo/) | Direct RGBW input with white-limit clamping, no extraction step. | Library only |
 | [True16RGBWGradientDemo](examples/True16RGBWGradientDemo/) | Animated 16-bit gradient sweep with per-pixel RGBW extraction and BFI. | Library only |
 | [TemporalFastLEDDemo](examples/TemporalFastLEDDemo/) | FastLED CRGB integration with GRB byte-order mapping and 5-phase BFI. | FastLED |
+| [PackedBFIMapDemo](examples/PackedBFIMapDemo/) | Demonstrates packed BFI maps — nybble-pair encoding halves per-pixel BFI storage from 4 bytes to 2. | Library only |
 | [HyperTeensy_Temporal_Blend](examples/HyperTeensy_Temporal_Blend/) | Full production sketch — ObjectFLED parallel output, RawHID+Serial USB, independent solver/calibration headers. | ObjectFLED |
 | [Teensy_Temporal_Calibration](examples/Teensy_Temporal_Calibration/) | Calibration capture sketch — drives LED states for host-side colorimetric measurement via serial protocol. | ObjectFLED |
 
 ### Build Status
 
 `build_report.py` runs on every PIO build and generates a table of all example build sizes and status.
+
+See [BUILD_REPORT.md](BUILD_REPORT.md) for the latest MCU firmware build results and [TOOLS_COMPILE_REPORT.md](TOOLS_COMPILE_REPORT.md) for the Python tools compile-check report.
 
 ## Calibration & Tools Workflow
 
