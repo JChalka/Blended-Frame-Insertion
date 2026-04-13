@@ -2,7 +2,7 @@
 
 Teensy 4.0 RGBW LED driver for SK6812 strips using the ObjectFLED library.
 Receives LED data from a custom HyperHDR fork over USB RawHID (with serial
-fallback) and renders per-pixel temporal Black Frame Insertion (BFI) via the
+fallback) and renders per-pixel temporal Blended Frame Insertion (BFI) via the
 TemporalBFI solver.
 
 > **Attribution.**
