@@ -273,6 +273,16 @@ Any device capable of the following should be able to drive the temporal BFI sys
 - **Processing**: Fast enough to process incoming data and compute blended output within the per-cycle budget
 - **Dual-core preferred**: Dedicated render core + data processing core for sustained high frame rates
 
+### 6.5 Data-Line Latch / Power-Detect Circuit
+
+Because the BFI render loop continuously alternates between upper and floor frames, the LEDs always hold the contents of whichever sub-frame was most recently transmitted. If the MCU loses power, crashes, or otherwise stops driving the data lines while the LED supply remains live, the strip will latch the last transmitted frame indefinitely. Depending on where in the cycle the output stopped, this could be the upper frame (full brightness), the floor frame (dim), or a partially written buffer — any of which may be visually jarring and electrically wasteful.
+
+**Recommended mitigation:** add a power-detect latch circuit on the LED data output line(s). The circuit monitors the MCU supply rail (or a GPIO "heartbeat" signal) and, when the MCU is detected as absent or non-responsive, pulls the data line low for longer than the LED reset period (~80 µs for WS2812/SK6812). This forces the strip to latch an all-zero (black) frame, clearing the display.
+
+A minimal implementation is a single N-channel MOSFET or open-drain buffer with its gate/enable tied to the MCU power rail through a voltage divider or supervisor IC. When the rail drops, the MOSFET releases and a pull-down resistor holds the data line low. More robust designs use a dedicated voltage supervisor (e.g. TPS3839) with a watchdog timeout, so even a hung MCU that keeps its rail alive but stops toggling data will trigger the latch-off.
+
+This is not strictly required for correct BFI operation, but is strongly recommended for any installation where the LED power supply and MCU power supply are independently switched or fused.
+
 ## 7. Known Limitations & Design Decisions
 
 1. **Linear temporal integration assumption**: The blend model assumes perfect temporal integration by the eye. Actual perception may depend on refresh rate, persistence, and individual visual sensitivity.
