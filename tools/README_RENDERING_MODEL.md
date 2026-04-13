@@ -206,7 +206,7 @@ The current calibration target uses SK6812 RGBW strips with the following parame
 | Latch delay | 100 µs |
 | Strip length | 48 LEDs |
 | Parallel output lines | 25 |
-| Minimum real frame rate | ≥120 Hz (flicker-free render loop) |
+| Minimum LED refresh rate | ≥600 Hz (5 phases × ≥120 Hz perceived frame rate) |
 
 The overclock factor of 1.4× shortens the bit period, reducing per-strip transmission time and enabling higher frame rates at the cost of tighter signal integrity margins. The 100 µs latch delay is the reset period between frames.
 
@@ -220,7 +220,7 @@ For NeoPixel-protocol LEDs (~800 kHz class), the number of blended frames that c
 
 For SPI / high-speed LEDs (≥10 MHz), the data transfer is fast enough that the bottleneck shifts to per-cycle computation throughput on the MCU.
 
-On dual-core architectures (ESP32), the render loop should spin on a dedicated core with data preparation (LUT lookups, blend computation, incoming data processing) running on the other core. This separation is critical for sustaining ≥120 Hz without frame drops.
+On dual-core architectures (ESP32), the render loop should spin on a dedicated core with data preparation (LUT lookups, blend computation, incoming data processing) running on the other core. This separation is critical for sustaining ≥600 Hz LED refresh (≥120 Hz perceived) without frame drops.
 
 ### 6.3 Known High-FPS Parallel Output Drivers
 

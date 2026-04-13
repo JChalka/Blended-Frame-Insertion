@@ -50,7 +50,7 @@ void loop() {
     SolverRuntime::commitPixelRGBW(upperFrame, floorFrame,
         bfiMapG, bfiMapR, bfiMapB, bfiMapW, pixelIndex, g, r, b, w);
 
-    // Render each BFI phase at ≥120 Hz
+    // Render each BFI phase — 5 phases per perceived frame at ≥600 Hz LED refresh
     for (uint8_t phase = 0; phase < 5; phase++) {
         SolverRuntime::renderSubpixelBFI_RGBW(upperFrame, floorFrame,
             bfiMapG, bfiMapR, bfiMapB, bfiMapW,
@@ -204,7 +204,7 @@ All demo environments target Teensy 4.0 at 816 MHz with LTO. The `HyperTeensy` e
 - **Minimum**: Any Arduino-compatible board with ≥64 KB RAM (for 4096-entry LUTs)
 - **Recommended**: Teensy 4.0/4.1 (1 MB RAM, 600+ MHz ARM Cortex-M7)
 - **Parallel output**: ObjectFLED (Teensy), FastLED (ESP32/Teensy), or I2SClocklessLedDriver (ESP32/S3)
-- **Target frame rate**: ≥120 Hz render loop (5 phases × 24+ Hz = 120+ Hz per phase)
+- **Target LED refresh rate**: ≥600 Hz (5 phases × ≥120 Hz perceived frame rate)
 
 ## License
 
