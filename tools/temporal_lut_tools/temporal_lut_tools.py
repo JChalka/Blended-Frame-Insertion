@@ -724,14 +724,14 @@ def export_runtime_json(lut_dir: Path, out_path: Path):
     out_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 def export_runtime_header(lut_dir: Path, out_path: Path):
-    lines = ["// Auto-generated runtime LUT header", "#pragma once", "", "namespace TemporalBFIRuntimeLUT {"]
+    lines = ["// Auto-generated runtime LUT header", "#pragma once", "", "#include <Arduino.h>", "", "namespace TemporalBFIRuntimeLUT {"]
     for ch in CHANNELS:
         p = lut_dir / f"{ch.lower()}_lut256.json"
         if not p.exists():
             continue
         arr = json.loads(p.read_text(encoding="utf-8"))
         q16 = [max(0, min(65535, round(float(v) * 65535.0))) for v in arr]
-        lines.append(f"static const uint16_t LUT_{ch}[256] = {{")
+        lines.append(f"static const uint16_t LUT_{ch}[256] PROGMEM = {{")
         for i in range(0, 256, 8):
             lines.append("    " + ", ".join(str(v) for v in q16[i:i+8]) + ",")
         lines.append("};\n")
@@ -817,7 +817,6 @@ def export_solver_header(lut_dir: Path, out_path: Path, max_bfi: int = 4, max_en
         if max_entries is not None:
             arr = _decimate_ladder(arr, max_entries)
         lower_values = [int(e.get("lower_value", 0)) for e in arr]
-        upper_values = [int(e.get("upper_value", e.get("value", 0))) for e in arr]
         lines.append(f"static const TemporalBFI::LadderEntry LADDER_{ch}[] PROGMEM = {{")
         for e in arr:
             lines.append(f"    {{{int(e['output_q16'])}, {int(e['value'])}, {int(e['bfi'])}}},")
@@ -825,10 +824,6 @@ def export_solver_header(lut_dir: Path, out_path: Path, max_bfi: int = 4, max_en
         lines.append(f"static const uint8_t LADDER_{ch}_LOWER[] PROGMEM = {{")
         for i in range(0, len(lower_values), 32):
             lines.append("    " + ", ".join(str(v) for v in lower_values[i:i+32]) + ",")
-        lines.append("};")
-        lines.append(f"static const uint8_t LADDER_{ch}_UPPER[] PROGMEM = {{")
-        for i in range(0, len(upper_values), 32):
-            lines.append("    " + ", ".join(str(v) for v in upper_values[i:i+32]) + ",")
         lines.append("};")
         lines.append(f"static const uint16_t LADDER_{ch}_COUNT = sizeof(LADDER_{ch}) / sizeof(LADDER_{ch}[0]);\n")
     lines.append("} // namespace TemporalBFIRuntimeLUT\n")
@@ -1974,6 +1969,8 @@ def write_patch_plan_true16(
         row_idx += 1
         rows.append({
             "name": str(name),
+            "mode": "fill16",
+            "use_fill16": 1,
             "r16": int(r16),
             "g16": int(g16),
             "b16": int(b16),
@@ -2066,7 +2063,7 @@ def write_patch_plan_true16(
         append_row("BLACK_q16_00000", 0, 0, 0, 0)
 
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["name", "r16", "g16", "b16", "w16", "repeats"])
+        w = csv.DictWriter(f, fieldnames=["name", "mode", "use_fill16", "r16", "g16", "b16", "w16", "repeats"])
         w.writeheader()
         w.writerows(rows)
     return rows
@@ -6371,7 +6368,7 @@ def export_calibration_true16_header(
 
     for ch in CHANNELS:
         lut = luts[ch]
-        lines.append(f"static const uint16_t LUT_{ch}_16_TO_16[{len(lut)}] = {{")
+        lines.append(f"static const uint16_t LUT_{ch}_16_TO_16[{len(lut)}] PROGMEM = {{")
         for i in range(0, len(lut), 8):
             chunk = lut[i:i+8]
             lines.append("    " + ", ".join(str(v) for v in chunk) + ",")
@@ -6713,14 +6710,14 @@ def export_calibration_header(
     ]
     for ch in CHANNELS:
         arr = profile_tables[ch]
-        lines.append(f"static const uint16_t LUT_{ch}_8_TO_16[256] = {{")
+        lines.append(f"static const uint16_t LUT_{ch}_8_TO_16[256] PROGMEM = {{")
         for i in range(0, 256, 8):
             lines.append("    " + ", ".join(str(v) for v in arr[i:i+8]) + ",")
         lines.append("};\n")
     for ch in CHANNELS:
         for bfi in range(max_bfi + 1):
             arr = per_bfi_tables[ch][bfi]
-            lines.append(f"static const uint16_t LUT_{ch}_BFI{bfi}_8_TO_16[256] = {{")
+            lines.append(f"static const uint16_t LUT_{ch}_BFI{bfi}_8_TO_16[256] PROGMEM = {{")
             for i in range(0, 256, 8):
                 lines.append("    " + ", ".join(str(v) for v in arr[i:i+8]) + ",")
             lines.append("};\n")
@@ -7138,6 +7135,8 @@ def export_transfer_header(
         "// Auto-generated transfer curve preview header v12",
         "#pragma once",
         "",
+        "#include <Arduino.h>",
+        "",
         "namespace TemporalBFITransferCurve {",
         f"static const uint16_t BUCKET_COUNT = {resolved_bucket_count};",
         f"static constexpr float REFERENCE_PEAK_NITS = {float(curve_meta.get('reference_peak_nits', 0.0)):.6f}f;",
@@ -7154,27 +7153,27 @@ def export_transfer_header(
     lines.append("")
     for ch in CHANNELS:
         chd = data["channels"][ch]
-        lines.append(f"static const uint16_t TARGET_{ch}[{resolved_bucket_count}] = {{")
+        lines.append(f"static const uint16_t TARGET_{ch}[{resolved_bucket_count}] PROGMEM = {{")
         for i in range(0, resolved_bucket_count, 16):
             lines.append("    " + ", ".join(str(v) for v in chd["target_q16"][i:i+16]) + ",")
         lines.append("};\n")
-        lines.append(f"static const uint16_t ACHIEVED_{ch}[{resolved_bucket_count}] = {{")
+        lines.append(f"static const uint16_t ACHIEVED_{ch}[{resolved_bucket_count}] PROGMEM = {{")
         for i in range(0, resolved_bucket_count, 16):
             lines.append("    " + ", ".join(str(v) for v in chd["achieved_q16"][i:i+16]) + ",")
         lines.append("};\n")
-        lines.append(f"static const uint8_t VALUE_{ch}[{resolved_bucket_count}] = {{")
+        lines.append(f"static const uint8_t VALUE_{ch}[{resolved_bucket_count}] PROGMEM = {{")
         for i in range(0, resolved_bucket_count, 32):
             lines.append("    " + ", ".join(str(v) for v in chd["value"][i:i+32]) + ",")
         lines.append("};\n")
-        lines.append(f"static const uint8_t LOWER_{ch}[{resolved_bucket_count}] = {{")
+        lines.append(f"static const uint8_t LOWER_{ch}[{resolved_bucket_count}] PROGMEM = {{")
         for i in range(0, resolved_bucket_count, 32):
             lines.append("    " + ", ".join(str(v) for v in chd["lower_value"][i:i+32]) + ",")
         lines.append("};\n")
-        lines.append(f"static const uint8_t UPPER_{ch}[{resolved_bucket_count}] = {{")
+        lines.append(f"static const uint8_t UPPER_{ch}[{resolved_bucket_count}] PROGMEM = {{")
         for i in range(0, resolved_bucket_count, 32):
             lines.append("    " + ", ".join(str(v) for v in chd["upper_value"][i:i+32]) + ",")
         lines.append("};\n")
-        lines.append(f"static const uint8_t BFI_{ch}[{resolved_bucket_count}] = {{")
+        lines.append(f"static const uint8_t BFI_{ch}[{resolved_bucket_count}] PROGMEM = {{")
         for i in range(0, resolved_bucket_count, 32):
             lines.append("    " + ", ".join(str(v) for v in chd["bfi"][i:i+32]) + ",")
         lines.append("};\n")
