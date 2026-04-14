@@ -4,4 +4,11 @@
 .vscode/launch.json
 .vscode/ipch
 .venv/*
-___pycache__/*
+
+# Python compile artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Path-containing GUI configs (machine-specific)
+tools/temporal_lut_tools/temporal_lut_tools_gui_config.json
