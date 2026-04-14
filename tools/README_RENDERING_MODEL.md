@@ -231,7 +231,7 @@ On dual-core architectures (ESP32), the render loop should spin on a dedicated c
 | Platform | Parallel mechanism | Max parallel strips |
 |----------|-------------------|---------------------|
 | ESP32 | I2S / LCD / ParallelIO peripherals | 16 |
-| Teensy 4.0/4.1 | ObjectFLED / OctoWS2811 integration | Full digital pin count |
+| Teensy 4.0/4.1 | [ObjectFLED](https://github.com/KurtMF/ObjectFLED) / [OctoWS2811](https://www.pjrc.com/teensy/td_libs_OctoWS2811.html) integration | Full digital pin count |
 | ESP32-S3 | LCD peripheral | 16 |
 | ESP32-P4 | ParallelIO | 16 (expected) |
 
@@ -260,7 +260,7 @@ On dual-core architectures (ESP32), the render loop should spin on a dedicated c
 | Driver / Platform | Notes |
 |-------------------|-------|
 | [NeoPixelBus](https://github.com/Makuna/NeoPixelBus) | Parallel output support on ESP32 |
-| WLED (NeoPixelBus backend) | By extension of NeoPixelBus parallel capabilities |
+| [WLED](https://kno.wled.ge/) (NeoPixelBus backend) | By extension of NeoPixelBus parallel capabilities |
 | STM32 MCUs (DMA + timer) | Parallel output via DMA to GPIO |
 | Pi Pico / Pico 2 (RP2040/RP2350) | PIO state machines provide flexible parallel output |
 
