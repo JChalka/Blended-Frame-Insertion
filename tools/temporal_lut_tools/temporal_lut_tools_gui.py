@@ -10,7 +10,7 @@ from matplotlib.figure import Figure
 import matplotlib.image as mpimg
 from matplotlib.patches import Rectangle
 
-APP_TITLE = "Temporal LUT Tools GUI v15"
+APP_TITLE = "Temporal LUT Tools GUI"
 CHANNELS = ["R", "G", "B", "W"]
 CONFIG_NAME = "temporal_lut_tools_gui_config.json"
 TRANSFER_CURVE_OPTIONS = ["linear", "gamma", "pq", "hlg", "bt1886", "srgb-ish", "toe-gamma"]
@@ -197,10 +197,6 @@ class App:
         self.profile_target_gamma_var = tk.DoubleVar(value=float(cfg.get("profile_target_gamma", 1.0)))
         self.black_level_compensation_var = tk.BooleanVar(value=bool(cfg.get("black_level_compensation", True)))
         self.black_level_y_var = tk.StringVar(value=str(cfg.get("black_level_y", "")))
-        self.before_header_var = tk.StringVar(value=cfg.get("before_header", ""))
-        self.after_header_var = tk.StringVar(value=cfg.get("after_header", str((self.default_export_dir / "calibration_profile.h").resolve())))
-        self.cal_compare_channel_var = tk.StringVar(value=cfg.get("cal_compare_channel", "R"))
-        self.cal_compare_bfi_var = tk.StringVar(value=cfg.get("cal_compare_bfi", "0"))
 
         self.transfer_curve_var = tk.StringVar(value=cfg.get("transfer_curve", "gamma"))
         self.transfer_gamma_var = tk.DoubleVar(value=float(cfg.get("transfer_gamma", 2.2)))
@@ -335,10 +331,6 @@ class App:
             "profile_target_gamma": self.profile_target_gamma_var.get(),
             "black_level_compensation": bool(self.black_level_compensation_var.get()),
             "black_level_y": self.black_level_y_var.get(),
-            "before_header": self.before_header_var.get(),
-            "after_header": self.after_header_var.get(),
-            "cal_compare_channel": self.cal_compare_channel_var.get(),
-            "cal_compare_bfi": self.cal_compare_bfi_var.get(),
 
             "transfer_curve": self.transfer_curve_var.get(),
             "transfer_gamma": self.transfer_gamma_var.get(),
@@ -502,6 +494,21 @@ class App:
         ttk.Button(row7, text="Export luma header", command=self.export_luma_weights_header).pack(side="left", padx=8)
 
     def _build_patch_calibration_frame(self, parent):
+        # --- Deprecation banner ---------------------------------------------------
+        banner = ttk.Frame(parent)
+        banner.pack(fill="x", pady=(4, 0))
+        banner_label = tk.Label(
+            banner,
+            text=(
+                "\u26A0  rgbw_lut_builder is now the preferred tool for calibration header exports.  "
+                "This tab will eventually be removed from this GUI."
+            ),
+            bg="#fff3cd", fg="#856404", font=("Segoe UI", 10, "bold"),
+            anchor="w", padx=10, pady=6,
+        )
+        banner_label.pack(fill="x", padx=8)
+        # --------------------------------------------------------------------------
+
         source_frame = ttk.LabelFrame(parent, text="Calibration Capture Source")
         source_frame.pack(fill="x", pady=(0, 10))
         source_row = ttk.Frame(source_frame)
@@ -554,26 +561,6 @@ class App:
         ttk.Entry(row1b, textvariable=self.true16_patch_plan_out_var).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(row1b, text="Browse...", command=self.choose_true16_patch_plan_out).pack(side="left")
         ttk.Button(row1b, text="Generate True16 plan", command=self.generate_patch_plan_true16).pack(side="left", padx=8)
-
-        legacy_toggle = ttk.Frame(controls); legacy_toggle.pack(fill="x", padx=8, pady=(0, 8))
-        self.legacy_controls_expanded_var = tk.BooleanVar(value=False)
-        self.legacy_toggle_button = ttk.Button(legacy_toggle, text="", command=self.toggle_legacy_controls, width=24)
-        self.legacy_toggle_button.pack(side="left")
-        ttk.Label(legacy_toggle, text="Legacy 8→16 controls and exports are tucked away here.").pack(side="left", padx=(12, 0))
-
-        self.legacy_controls_container = ttk.Frame(controls)
-
-        row2 = ttk.Frame(self.legacy_controls_container); row2.pack(fill="x", padx=8, pady=(0, 8))
-        ttk.Label(row2, text="Calibration header").pack(side="left")
-        ttk.Entry(row2, textvariable=self.calibration_header_out_var).pack(side="left", fill="x", expand=True, padx=6)
-        ttk.Button(row2, text="Browse...", command=self.choose_calibration_header_out).pack(side="left")
-        ttk.Button(row2, text="Export calibration header", command=self.export_calibration_header).pack(side="left", padx=8)
-
-        row3 = ttk.Frame(self.legacy_controls_container); row3.pack(fill="x", padx=8, pady=(0, 8))
-        ttk.Label(row3, text="Calibration JSON").pack(side="left")
-        ttk.Entry(row3, textvariable=self.calibration_json_out_var).pack(side="left", fill="x", expand=True, padx=6)
-        ttk.Button(row3, text="Browse...", command=self.choose_calibration_json_out).pack(side="left")
-        ttk.Button(row3, text="Export calibration JSON", command=self.export_calibration_json).pack(side="left", padx=8)
 
         row3b = ttk.Frame(self.true16_controls_container); row3b.pack(fill="x", padx=8, pady=(0, 8))
         ttk.Label(row3b, text="True16 header").pack(side="left")
@@ -642,7 +629,7 @@ class App:
 
         self._set_true16_controls_visible(bool(self.true16_controls_expanded_var.get()))
 
-        row4 = ttk.Frame(self.legacy_controls_container); row4.pack(fill="x", padx=8, pady=(0, 8))
+        row4 = ttk.Frame(controls); row4.pack(fill="x", padx=8, pady=(0, 8))
         ttk.Label(row4, text="Profile source BFI").pack(side="left")
         ttk.Spinbox(row4, from_=0, to=8, textvariable=self.profile_source_bfi_var, width=6).pack(side="left", padx=6)
         ttk.Label(row4, text="White policy").pack(side="left", padx=(12, 0))
@@ -650,13 +637,14 @@ class App:
         ttk.Label(row4, text="Mixing profile").pack(side="left", padx=(12, 0))
         ttk.Combobox(row4, textvariable=self.mixing_profile_var, values=MIXING_PROFILE_OPTIONS, state="readonly", width=16).pack(side="left", padx=6)
 
-        row5 = ttk.Frame(self.legacy_controls_container); row5.pack(fill="x", padx=8, pady=(0, 8))
+        row5 = ttk.Frame(controls); row5.pack(fill="x", padx=8, pady=(0, 8))
         ttk.Label(row5, text="Neutral threshold Q16").pack(side="left")
         ttk.Entry(row5, textvariable=self.neutral_threshold_q16_var, width=10).pack(side="left", padx=6)
         ttk.Label(row5, text="White weight Q16").pack(side="left", padx=(12, 0))
         ttk.Entry(row5, textvariable=self.white_weight_q16_var, width=10).pack(side="left", padx=6)
         ttk.Label(row5, text="RGB weight Q16").pack(side="left", padx=(12, 0))
         ttk.Entry(row5, textvariable=self.rgb_weight_q16_var, width=10).pack(side="left", padx=6)
+        ttk.Label(row5, text="(leave blank for mixing-profile defaults)").pack(side="left", padx=(12, 0))
 
         row5b = ttk.Frame(controls); row5b.pack(fill="x", padx=8, pady=(0, 8))
         ttk.Label(row5b, text="Calibration target").pack(side="left")
@@ -678,20 +666,6 @@ class App:
         ttk.Label(row6, text="Min code").pack(side="left", padx=(10, 0))
         ttk.Entry(row6, textvariable=self.auto_white_min_code_var, width=6).pack(side="left", padx=6)
         ttk.Button(row6, text="Refresh visuals", command=self.refresh_calibration_visuals).pack(side="left", padx=(12, 0))
-
-        row7 = ttk.Frame(self.legacy_controls_container); row7.pack(fill="x", padx=8, pady=(0, 8))
-        ttk.Button(row7, text="Apply Warm-Guard Starter", command=self.apply_warm_guard_starter).pack(side="left")
-        ttk.Button(row7, text="Use Super-Fine Preset", command=self.apply_super_fine_patch_preset).pack(side="left", padx=(8, 0))
-        ttk.Button(row7, text="Use Super-Fine+", command=self.apply_super_fine_plus_patch_preset).pack(side="left", padx=(8, 0))
-        ttk.Label(row7, text="One-click setup for a warm-safe baseline and dense patch coverage.").pack(side="left", padx=(12, 0))
-
-        row8 = ttk.Frame(self.legacy_controls_container); row8.pack(fill="x", padx=8, pady=(0, 8))
-        ttk.Label(
-            row8,
-            text="Tip: leave Q16 overrides blank to use the selected mixing profile defaults.",
-        ).pack(side="left")
-
-        self._set_legacy_controls_visible(False)
 
         preview_tabs = ttk.Notebook(preview)
         preview_tabs.pack(fill="both", expand=True, padx=8, pady=8)
@@ -775,25 +749,6 @@ class App:
             if self.true16_controls_container.winfo_manager():
                 self.true16_controls_container.pack_forget()
             self.true16_toggle_button.configure(text="Show True16 Controls")
-
-    def toggle_legacy_controls(self):
-        self._set_legacy_controls_visible(not bool(self.legacy_controls_expanded_var.get()))
-
-    def _set_legacy_controls_visible(self, expanded):
-        expanded = bool(expanded)
-        self.legacy_controls_expanded_var.set(expanded)
-
-        if not hasattr(self, "legacy_controls_container") or not hasattr(self, "legacy_toggle_button"):
-            return
-
-        if expanded:
-            if not self.legacy_controls_container.winfo_manager():
-                self.legacy_controls_container.pack(fill="x", padx=0, pady=(0, 8))
-            self.legacy_toggle_button.configure(text="Hide Legacy 8→16 Controls")
-        else:
-            if self.legacy_controls_container.winfo_manager():
-                self.legacy_controls_container.pack_forget()
-            self.legacy_toggle_button.configure(text="Show Legacy 8→16 Controls")
 
     def _collect_calibration_ui_settings(self):
         profile = self.mixing_profile_var.get()
@@ -914,32 +869,6 @@ class App:
             w = min(1.0, w + moved)
 
         return r, g, b, w
-
-    def apply_warm_guard_starter(self):
-        # Warm-safe baseline that keeps near-neutral cleanup but protects oranges/yellows.
-        self.patch_preset_var.set("warm-guard")
-        self.white_policy_var.set("measured-optimal")
-        self.mixing_profile_var.set("warm-guard")
-        self.neutral_threshold_q16_var.set("")
-        self.white_weight_q16_var.set("")
-        self.rgb_weight_q16_var.set("")
-        self.white_channel_scale_var.set(0.92)
-        self.white_channel_gamma_var.set(1.08)
-        self.auto_white_scale_var.set(True)
-        self.auto_white_target_ratio_var.set(1.30)
-        self.auto_white_min_code_var.set(24)
-        self.refresh_calibration_visuals()
-        self.log_line("Applied warm-guard starter profile.")
-
-    def apply_super_fine_patch_preset(self):
-        self.patch_preset_var.set("super-fine")
-        self.refresh_calibration_visuals()
-        self.log_line("Switched patch preset to super-fine.")
-
-    def apply_super_fine_plus_patch_preset(self):
-        self.patch_preset_var.set("super-fine-plus")
-        self.refresh_calibration_visuals()
-        self.log_line("Switched patch preset to super-fine-plus.")
 
     def _shape_white_for_preview(self, w_norm, gamma, effective_scale):
         w_norm = self._clamp01(w_norm)
@@ -1148,12 +1077,6 @@ class App:
         ttk.Label(top, text="Preview channel").pack(side="left")
         ttk.Combobox(top, textvariable=self.preview_channel_var, values=CHANNELS, state="readonly", width=6).pack(side="left", padx=6)
         ttk.Button(top, text="Refresh preview", command=self.refresh_preview).pack(side="left", padx=(0,20))
-        ttk.Label(top, text="Before header").pack(side="left")
-        ttk.Entry(top, textvariable=self.before_header_var, width=36).pack(side="left", padx=6)
-        ttk.Button(top, text="Browse...", command=self.choose_before_header).pack(side="left")
-        ttk.Label(top, text="After header").pack(side="left", padx=(12,0))
-        ttk.Entry(top, textvariable=self.after_header_var, width=36).pack(side="left", padx=6)
-        ttk.Button(top, text="Browse...", command=self.choose_after_header).pack(side="left")
         body = ttk.PanedWindow(frame, orient="horizontal")
         body.pack(fill="both", expand=True, padx=8, pady=(0,8))
         left = ttk.Frame(body); body.add(left, weight=4)
@@ -1192,17 +1115,6 @@ class App:
         self.ax_mono = self.figure_mono.add_subplot(111)
         self.canvas_mono = FigureCanvasTkAgg(self.figure_mono, master=mono_tab)
         self.canvas_mono.get_tk_widget().pack(fill="both", expand=True)
-        cal_tab = ttk.Frame(notebook); notebook.add(cal_tab, text="Calibration Compare")
-        cal_top = ttk.Frame(cal_tab); cal_top.pack(fill="x", padx=8, pady=8)
-        ttk.Label(cal_top, text="Channel").pack(side="left")
-        ttk.Combobox(cal_top, textvariable=self.cal_compare_channel_var, values=CHANNELS, state="readonly", width=6).pack(side="left", padx=6)
-        ttk.Label(cal_top, text="Overlay BFI").pack(side="left")
-        ttk.Combobox(cal_top, textvariable=self.cal_compare_bfi_var, values=[str(i) for i in range(9)], state="readonly", width=5).pack(side="left", padx=6)
-        ttk.Button(cal_top, text="Refresh compare", command=self.refresh_calibration_compare).pack(side="left", padx=10)
-        self.figure_cal = Figure(figsize=(7,5), dpi=100)
-        self.ax_cal = self.figure_cal.add_subplot(111)
-        self.canvas_cal = FigureCanvasTkAgg(self.figure_cal, master=cal_tab)
-        self.canvas_cal.get_tk_widget().pack(fill="both", expand=True)
 
         transfer_tab = ttk.Frame(notebook); notebook.add(transfer_tab, text="Transfer Curve")
         transfer_top = ttk.Frame(transfer_tab); transfer_top.pack(fill="x", padx=8, pady=8)
@@ -1375,9 +1287,6 @@ class App:
     def choose_true16_patch_plan_out(self):
         p = filedialog.asksaveasfilename(initialdir=str(self.script_dir), defaultextension=".csv", filetypes=[("CSV files", "*.csv")])
         if p: self.true16_patch_plan_out_var.set(p)
-    def choose_calibration_header_out(self):
-        p = filedialog.asksaveasfilename(initialdir=str(self.export_out_var.get() or self.default_export_dir), defaultextension=".h", filetypes=[("Header files", "*.h"), ("All files", "*.*")])
-        if p: self.calibration_header_out_var.set(p)
     def choose_true16_header_out(self):
         p = filedialog.asksaveasfilename(initialdir=str(self.export_out_var.get() or self.default_export_dir), defaultextension=".h", filetypes=[("Header files", "*.h"), ("All files", "*.*")])
         if p:
@@ -1399,15 +1308,6 @@ class App:
     def choose_true16_transfer_curve_header(self):
         p = filedialog.askopenfilename(filetypes=[("Header files", "*.h"), ("All files", "*.*")])
         if p: self.true16_transfer_curve_header_var.set(p)
-    def choose_calibration_json_out(self):
-        p = filedialog.asksaveasfilename(initialdir=str(self.export_out_var.get() or self.default_export_dir), defaultextension=".json", filetypes=[("JSON files", "*.json")])
-        if p: self.calibration_json_out_var.set(p)
-    def choose_before_header(self):
-        p = filedialog.askopenfilename(filetypes=[("Header files", "*.h"), ("All files", "*.*")])
-        if p: self.before_header_var.set(p)
-    def choose_after_header(self):
-        p = filedialog.askopenfilename(filetypes=[("Header files", "*.h"), ("All files", "*.*")])
-        if p: self.after_header_var.set(p)
 
     def open_output_folder(self):
         path = Path(self.build_out_dir_var.get()).expanduser()
@@ -1568,85 +1468,9 @@ class App:
             args.append("--no-white-protection-mixes")
         self.run_subprocess(args, on_success=lambda _s: messagebox.showinfo("True16 patch plan generated", f"True16 patch plan written to:\n{out_path}"))
 
-    def export_calibration_header(self):
-        out_path = Path(self.calibration_header_out_var.get()).expanduser(); out_path.parent.mkdir(parents=True, exist_ok=True)
-        settings = self._collect_calibration_ui_settings()
-        args = [
-            sys.executable, str(self.tool_path), "export-calibration-header",
-            "--measure-dir", str(Path(self.calmeasure_dir_var.get()).expanduser()),
-            "--out", str(out_path),
-            "--max-bfi", str(self.patch_max_bfi_var.get()),
-            "--profile-source-bfi", str(self.profile_source_bfi_var.get()),
-            "--white-policy", self.white_policy_var.get(),
-            "--mixing-profile", settings["mixing_profile"],
-            "--white-channel-scale", str(settings["white_channel_scale"]),
-            "--white-channel-gamma", str(settings["white_channel_gamma"]),
-            "--auto-white-target-ratio", str(settings["auto_white_target_ratio"]),
-            "--auto-white-min-code", str(settings["auto_white_min_code"]),
-        ]
-        neutral_override = self._parse_optional_int(self.neutral_threshold_q16_var.get())
-        white_override = self._parse_optional_int(self.white_weight_q16_var.get())
-        rgb_override = self._parse_optional_int(self.rgb_weight_q16_var.get())
-        if neutral_override is not None:
-            args += ["--neutral-threshold-q16", str(neutral_override)]
-        if white_override is not None:
-            args += ["--white-weight-q16", str(white_override)]
-        if rgb_override is not None:
-            args += ["--rgb-weight-q16", str(rgb_override)]
-        if settings["auto_white_scale"]:
-            args.append("--auto-white-scale")
-        self._append_correction_args(args)
-        self.after_header_var.set(str(out_path))
-        self.refresh_calibration_compare()
-        self.refresh_calibration_visuals()
-        self.refresh_transfer_curve()
-        self.refresh_luma_weights()
-
-        def on_success(stdout_text):
-            web_report = None
-            try:
-                payload = json.loads(stdout_text or "{}")
-                web_report = payload.get("web_report")
-            except Exception:
-                web_report = None
-
-            msg = f"Calibration header written to:\n{out_path}"
-            if web_report:
-                msg += f"\n\nHTML color sanity report:\n{Path(str(web_report)).expanduser()}"
-            messagebox.showinfo("Exported", msg)
-
-        self.run_subprocess(args, on_success=on_success)
-
-    def export_calibration_json(self):
-        out_path = Path(self.calibration_json_out_var.get()).expanduser(); out_path.parent.mkdir(parents=True, exist_ok=True)
-        settings = self._collect_calibration_ui_settings()
-        args = [
-            sys.executable, str(self.tool_path), "export-calibration-json",
-            "--measure-dir", str(Path(self.calmeasure_dir_var.get()).expanduser()),
-            "--out", str(out_path),
-            "--max-bfi", str(self.patch_max_bfi_var.get()),
-            "--profile-source-bfi", str(self.profile_source_bfi_var.get()),
-            "--white-policy", self.white_policy_var.get(),
-            "--mixing-profile", settings["mixing_profile"],
-            "--white-channel-scale", str(settings["white_channel_scale"]),
-            "--white-channel-gamma", str(settings["white_channel_gamma"]),
-            "--auto-white-target-ratio", str(settings["auto_white_target_ratio"]),
-            "--auto-white-min-code", str(settings["auto_white_min_code"]),
-        ]
-        neutral_override = self._parse_optional_int(self.neutral_threshold_q16_var.get())
-        white_override = self._parse_optional_int(self.white_weight_q16_var.get())
-        rgb_override = self._parse_optional_int(self.rgb_weight_q16_var.get())
-        if neutral_override is not None:
-            args += ["--neutral-threshold-q16", str(neutral_override)]
-        if white_override is not None:
-            args += ["--white-weight-q16", str(white_override)]
-        if rgb_override is not None:
-            args += ["--rgb-weight-q16", str(rgb_override)]
-        if settings["auto_white_scale"]:
-            args.append("--auto-white-scale")
-        self._append_correction_args(args)
-        self.refresh_calibration_visuals()
-        self.run_subprocess(args, on_success=lambda _s: messagebox.showinfo("Exported", f"Calibration JSON written to:\n{out_path}"))
+    # NOTE: Legacy 8→16 export-calibration-header / export-calibration-json CLI
+    # subcommands remain available via temporal_lut_tools.py; the GUI buttons were
+    # removed in favour of rgbw_lut_builder which is the preferred calibration path.
 
     def export_calibration_true16_header(self):
         out_path = Path(self.true16_header_out_var.get()).expanduser(); out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2586,8 +2410,6 @@ class App:
     def _refresh_preview_finish(self, token):
         if token != self._preview_refresh_token:
             return
-        self._set_refresh_progress(token, f"Refreshing {self.preview_channel_var.get().upper()} preview: calibration compare", 0.96)
-        self.refresh_calibration_compare()
         self.root.after(1, lambda: self._refresh_preview_finish_visuals(token))
 
     def _refresh_preview_finish_visuals(self, token):
@@ -2616,25 +2438,6 @@ class App:
         p = Path(path_str)
         if not p.exists(): return {}
         return parse_header_arrays(p.read_text(encoding="utf-8", errors="ignore"))
-
-    def refresh_calibration_compare(self):
-        self.ax_cal.clear()
-        before = self._load_header_arrays(self.before_header_var.get())
-        after = self._load_header_arrays(self.after_header_var.get())
-        ch = self.cal_compare_channel_var.get(); bfi = self.cal_compare_bfi_var.get()
-        key_profile = f"LUT_{ch}_8_TO_16"; key_bfi = f"LUT_{ch}_BFI{bfi}_8_TO_16"
-        plotted = False
-        if key_profile in before:
-            self.ax_cal.plot(range(256), before[key_profile], label=f"before {key_profile}"); plotted = True
-        if key_profile in after:
-            self.ax_cal.plot(range(256), after[key_profile], label=f"after {key_profile}"); plotted = True
-        if key_bfi in after:
-            self.ax_cal.plot(range(256), after[key_bfi], linestyle="--", label=f"after {key_bfi}"); plotted = True
-        self.ax_cal.set_title(f"Calibration LUT comparison — channel {ch}")
-        self.ax_cal.set_xlabel("Input code"); self.ax_cal.set_ylabel("Output Q16"); self.ax_cal.grid(True, alpha=0.3)
-        if plotted: self.ax_cal.legend()
-        self.canvas_cal.draw()
-
 
     def _clamp01(self, x):
         x = float(x)

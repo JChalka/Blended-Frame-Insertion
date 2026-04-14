@@ -15,7 +15,7 @@ import numpy as np
 SCRIPT_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = SCRIPT_DIR.parents[3]  # rgbw_lut_builder → tools → TemporalBFI → lib → project root
 
-DEFAULT_INPUT_DIR = _PROJECT_ROOT / "tools" / "v15" / "patch captures"
+DEFAULT_INPUT_DIR = _PROJECT_ROOT / "tools" / "patch_captures"
 DEFAULT_OUTPUT_DIR = _PROJECT_ROOT / "tools" / "rgbw_capture_analysis" / "solver_outputs"
 
 
