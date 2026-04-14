@@ -1,9 +1,10 @@
 # TemporalBFI Tools Compile Report
 
-**12/12** Python tools compiled successfully.
+**13/13** Python tools compiled successfully.
 
 | Tool | Status |
 |------|--------|
+| `tools/comprehensive_patch_plan/generate_patch_batches_v2.py` | OK |
 | `tools/comprehensive_patch_plan/generate_patch_plan_true16_comprehensive_v6.py` | OK |
 | `tools/host_calibration_gui/host_calibration_gui.py` | OK |
 | `tools/rgbw_lut_builder/analyze_rgbw_captures.py` | OK |
