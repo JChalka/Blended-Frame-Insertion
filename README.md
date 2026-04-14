@@ -1,6 +1,6 @@
 # TemporalBFI
 
-Temporal rendering framework for addressable LED strips, providing sub-8-bit brightness resolution through Blended Frame Insertion (BFI). By rapidly alternating between two brightness levels across a multi-phase display cycle, the library achieves 16-bit equivalent perceived output using only 8-bit LED drivers.
+Temporal rendering framework for addressable LED strips, providing sub-8-bit brightness resolution through Blended Frame Insertion (BFI). By rapidly alternating between two brightness levels across a multi-phase display cycle, the library achieves 16-bit equivalent perceived output using only 8-bit LED drivers. In the industry this is typically known as Temporal Dithering or FRC (Frame Rate Control). The main distinction (and why I chose to call it Blended Frame Insertion) is that we introduce a larger cycle length allowing for finer control.
 
 ## Project Background
 
