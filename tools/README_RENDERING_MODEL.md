@@ -231,11 +231,11 @@ On dual-core architectures (ESP32), the render loop should spin on a dedicated c
 | Platform | Parallel mechanism | Max parallel strips |
 |----------|-------------------|---------------------|
 | ESP32 | I2S / LCD / ParallelIO peripherals | 16 |
-| Teensy 4.0/4.1 | ObjectFLED / OctoWS2812 integration | Full digital pin count |
+| Teensy 4.0/4.1 | ObjectFLED / OctoWS2811 integration | Full digital pin count |
 | ESP32-S3 | LCD peripheral | 16 |
 | ESP32-P4 | ParallelIO | 16 (expected) |
 
-- **ObjectFLED** is a newer fork of OctoWS2812 that adds overclocking and fine-grained control of T0H, T1H, and latch timings for NeoPixel-type protocols. ObjectFLED can also be used independently of FastLED.
+- **ObjectFLED** is a newer fork of OctoWS2811 that adds overclocking and fine-grained control of T0H, T1H, and latch timings for NeoPixel-type protocols. ObjectFLED can also be used independently of FastLED.
 - Known functional targets: Teensy 4.0/4.1, ESP32, ESP32-S3, ESP32-P4.
 
 #### I2SClocklessLedDriver (hpwit)
