@@ -393,7 +393,7 @@ class App:
         ttk.Label(row1, text="Channel").pack(side="left")
         ttk.Combobox(row1, textvariable=self.plan_channel_var, values=CHANNELS + ["ALL"], state="readonly", width=6).pack(side="left", padx=(6,16))
         ttk.Label(row1, text="Mode").pack(side="left")
-        ttk.Combobox(row1, textvariable=self.plan_mode_var, values=["bfi", "temporal-blend"], state="readonly", width=16).pack(side="left", padx=(6,16))
+        ttk.Combobox(row1, textvariable=self.plan_mode_var, values=["black-frame-insertion", "temporal-blend"], state="readonly", width=16).pack(side="left", padx=(6,16))
         ttk.Label(row1, text="Max BFI").pack(side="left")
         ttk.Spinbox(row1, from_=0, to=8, textvariable=self.plan_max_bfi_var, width=6).pack(side="left", padx=(6,16))
         ttk.Label(row1, text="Preset").pack(side="left")
