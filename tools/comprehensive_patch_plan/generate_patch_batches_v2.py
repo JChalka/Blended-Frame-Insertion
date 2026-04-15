@@ -649,6 +649,129 @@ def generate_white_mix_orange_peach_batch():
     return patches
 
 
+def generate_sparse_cyan_teal_batch():
+    """Saturated cyan/teal fills — targets the upper-left gap in CIE xy (~x:0.12-0.24, y:0.38-0.58).
+
+    High G + high B, near-zero R.  Covers pure cyan through blue-leaning teal
+    and green-leaning teal, with and without white channel.
+    """
+    patches = []
+    hues = [
+        # (R, G, B) — cyan-teal family, sorted from blue-heavy to green-heavy
+        (0.00, 0.40, 1.00),   # blue-cyan
+        (0.00, 0.55, 1.00),   # cyan-blue
+        (0.00, 0.70, 1.00),   # balanced cyan
+        (0.00, 0.85, 1.00),   # green-cyan
+        (0.00, 1.00, 1.00),   # pure cyan
+        (0.00, 1.00, 0.80),   # teal
+        (0.00, 1.00, 0.60),   # green-teal
+        (0.05, 0.60, 1.00),   # slightly warm blue-cyan
+        (0.05, 0.80, 1.00),   # slightly warm cyan
+        (0.08, 1.00, 0.70),   # slightly warm teal
+        (0.00, 0.50, 0.80),   # dark steel teal
+        (0.00, 0.65, 0.85),   # medium teal
+    ]
+    rgb_bases = [4096, 8192, 12288, 16384, 24576, 32768, 40960, 49152, 57344, 65535]
+    white_ratios = [0.0, 0.08, 0.18, 0.30, 0.45, 0.60]
+    for base in rgb_bases:
+        for r, g, b in hues:
+            for w_ratio in white_ratios:
+                r16 = min(65535, int(base * r))
+                g16 = min(65535, int(base * g))
+                b16 = min(65535, int(base * b))
+                w16 = min(65535, int(base * w_ratio))
+                name = f"sparse_cyanteal_r{r:.2f}g{g:.2f}b{b:.2f}_{base}_w{int(w_ratio*100)}"
+                patches.append({'name': name, 'r16': r16, 'g16': g16, 'b16': b16, 'w16': w16})
+    return patches
+
+
+def generate_sparse_green_yellowgreen_batch():
+    """Saturated green/yellow-green fills — targets the upper-center gap in CIE xy (~x:0.22-0.35, y:0.54-0.68).
+
+    High G dominant, small R for yellow-green shift, near-zero B.
+    Covers pure green through chartreuse, with and without white channel.
+    """
+    patches = []
+    hues = [
+        # (R, G, B) — green to yellow-green family
+        (0.00, 1.00, 0.00),   # pure green
+        (0.00, 1.00, 0.05),   # green + trace blue
+        (0.00, 1.00, 0.12),   # green + slight blue (toward spectral locus)
+        (0.08, 1.00, 0.00),   # green + trace red
+        (0.15, 1.00, 0.00),   # yellow-green
+        (0.25, 1.00, 0.00),   # chartreuse
+        (0.35, 1.00, 0.00),   # lime-chartreuse
+        (0.45, 1.00, 0.00),   # warm chartreuse
+        (0.10, 1.00, 0.05),   # yellow-green + trace blue
+        (0.20, 1.00, 0.05),   # chartreuse + trace blue
+        (0.30, 1.00, 0.08),   # warm lime + trace blue
+        (0.05, 0.80, 0.00),   # dimmer green
+    ]
+    rgb_bases = [4096, 8192, 12288, 16384, 24576, 32768, 40960, 49152, 57344, 65535]
+    white_ratios = [0.0, 0.08, 0.18, 0.30, 0.45, 0.60]
+    for base in rgb_bases:
+        for r, g, b in hues:
+            for w_ratio in white_ratios:
+                r16 = min(65535, int(base * r))
+                g16 = min(65535, int(base * g))
+                b16 = min(65535, int(base * b))
+                w16 = min(65535, int(base * w_ratio))
+                name = f"sparse_greenyg_r{r:.2f}g{g:.2f}b{b:.2f}_{base}_w{int(w_ratio*100)}"
+                patches.append({'name': name, 'r16': r16, 'g16': g16, 'b16': b16, 'w16': w16})
+    return patches
+
+
+def generate_sparse_warm_saturated_batch():
+    """Saturated warm fills — targets the large lower-right gap in CIE xy (~x:0.35-0.65, y:0.15-0.45).
+
+    R-dominant with varying G (orange to pure red) and varying B (red to
+    red-magenta/pink).  These are highly chromatic points far from neutral,
+    covering the broad warm interior of the LED gamut triangle.
+    """
+    patches = []
+    hues = [
+        # (R, G, B) — warm saturated family, from deep red through orange
+        (1.00, 0.00, 0.00),   # pure red
+        (1.00, 0.08, 0.00),   # red + trace green
+        (1.00, 0.15, 0.00),   # deep red-orange
+        (1.00, 0.25, 0.00),   # red-orange
+        (1.00, 0.35, 0.00),   # orange-red
+        (1.00, 0.50, 0.00),   # orange
+        (1.00, 0.60, 0.00),   # amber-orange
+        (1.00, 0.70, 0.00),   # amber
+        (1.00, 0.80, 0.00),   # warm yellow
+        # Red to red-magenta (adds some B, no G)
+        (1.00, 0.00, 0.08),   # red + trace blue
+        (1.00, 0.00, 0.18),   # red-pink
+        (1.00, 0.00, 0.30),   # red-magenta
+        (1.00, 0.00, 0.45),   # magenta-red
+        # Mixed warm with slight B (desaturated warm)
+        (1.00, 0.20, 0.05),   # warm orange + trace blue
+        (1.00, 0.35, 0.08),   # orange + trace blue
+        (1.00, 0.50, 0.10),   # light orange + trace blue
+        (1.00, 0.10, 0.15),   # pinkish red
+        (1.00, 0.25, 0.12),   # coral-ish
+        # Lower-brightness saturated warm (darker area of the region)
+        (0.80, 0.00, 0.00),   # dark red
+        (0.80, 0.20, 0.00),   # dark orange-red
+        (0.80, 0.40, 0.00),   # dark orange
+        (0.60, 0.00, 0.00),   # deep dark red
+        (0.60, 0.15, 0.00),   # deep dark orange-red
+    ]
+    rgb_bases = [4096, 8192, 12288, 16384, 24576, 32768, 40960, 49152, 57344, 65535]
+    white_ratios = [0.0, 0.06, 0.12, 0.22, 0.35, 0.50]
+    for base in rgb_bases:
+        for r, g, b in hues:
+            for w_ratio in white_ratios:
+                r16 = min(65535, int(base * r))
+                g16 = min(65535, int(base * g))
+                b16 = min(65535, int(base * b))
+                w16 = min(65535, int(base * w_ratio))
+                name = f"sparse_warmsaturated_r{r:.2f}g{g:.2f}b{b:.2f}_{base}_w{int(w_ratio*100)}"
+                patches.append({'name': name, 'r16': r16, 'g16': g16, 'b16': b16, 'w16': w16})
+    return patches
+
+
 def export_batch(patches, batch_name, base_dir=Path('patch_plans')):
     """Export a batch to CSV."""
     base_dir = Path(base_dir)
@@ -682,6 +805,9 @@ def main():
         ('bright_yellow_orange', generate_bright_yellow_orange_batch()),
         ('edge_case_colors', generate_edge_case_colors_batch()),
         ('white_mix_orange_peach', generate_white_mix_orange_peach_batch()),
+        ('sparse_cyan_teal', generate_sparse_cyan_teal_batch()),
+        ('sparse_green_yellowgreen', generate_sparse_green_yellowgreen_batch()),
+        ('sparse_warm_saturated', generate_sparse_warm_saturated_batch()),
     ]
     
     for batch_name, patches in batches:

@@ -146,6 +146,26 @@ CHROMA_FAMILIES = (
     ("violet", (0.55, 0.00, 1.00)),
     ("magenta", (1.00, 0.00, 1.00)),
     ("spring", (0.00, 1.00, 0.45)),
+    # Sparse cyan-teal gap (CIE xy upper-left)
+    ("bluecyan", (0.00, 0.45, 1.00)),
+    ("cyanteal", (0.00, 0.70, 1.00)),
+    ("teal", (0.00, 1.00, 0.75)),
+    ("greenteal", (0.00, 1.00, 0.55)),
+    ("steelteal", (0.05, 0.60, 0.90)),
+    # Sparse green/yellow-green gap (CIE xy upper-center)
+    ("puregreen", (0.00, 1.00, 0.00)),
+    ("yellowgreen", (0.18, 1.00, 0.00)),
+    ("chartreuse", (0.30, 1.00, 0.00)),
+    ("warmchartreuse", (0.42, 1.00, 0.00)),
+    ("gentlegreen", (0.08, 1.00, 0.06)),
+    # Sparse warm saturated gap (CIE xy lower-right)
+    ("purered", (1.00, 0.00, 0.00)),
+    ("deepredorange", (1.00, 0.18, 0.00)),
+    ("redorange", (1.00, 0.30, 0.00)),
+    ("saturatedorange", (1.00, 0.50, 0.00)),
+    ("redpink", (1.00, 0.00, 0.20)),
+    ("redmagenta", (1.00, 0.00, 0.35)),
+    ("coralsat", (1.00, 0.25, 0.10)),
 )
 
 WHITE_DOMINANT_FAMILIES = (
@@ -320,6 +340,9 @@ def add_legacy_rgbw_batches(builder: PatchPlanBuilder) -> None:
         ("legacy_bright_yellow_orange", batch_lib.generate_bright_yellow_orange_batch),
         ("legacy_edge_cases", batch_lib.generate_edge_case_colors_batch),
         ("legacy_white_mix_orange_peach", batch_lib.generate_white_mix_orange_peach_batch),
+        ("sparse_cyan_teal", batch_lib.generate_sparse_cyan_teal_batch),
+        ("sparse_green_yellowgreen", batch_lib.generate_sparse_green_yellowgreen_batch),
+        ("sparse_warm_saturated", batch_lib.generate_sparse_warm_saturated_batch),
     )
     for category, function in batch_functions:
         for row in function():
