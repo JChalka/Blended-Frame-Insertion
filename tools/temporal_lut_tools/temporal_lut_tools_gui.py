@@ -113,7 +113,7 @@ class App:
         self.plan_channel_var = tk.StringVar(value=cfg.get("plan_channel", "W"))
         self.plan_max_bfi_var = tk.IntVar(value=int(cfg.get("plan_max_bfi", 4)))
         self.plan_step_var = tk.IntVar(value=int(cfg.get("plan_step", 0)))
-        self.plan_mode_var = tk.StringVar(value=cfg.get("plan_mode", "bfi"))
+        self.plan_mode_var = tk.StringVar(value=cfg.get("plan_mode", "black-frame-insertion"))
         self.plan_floor_step_var = tk.IntVar(value=int(cfg.get("plan_floor_step", 0)))
         self.plan_preset_var = tk.StringVar(value=cfg.get("plan_preset", "custom"))
         self.plan_out_var = tk.StringVar(value=cfg.get("plan_out", str((self.script_dir / "measurement_plan_w.csv").resolve())))
