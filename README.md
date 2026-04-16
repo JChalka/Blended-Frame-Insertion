@@ -104,6 +104,7 @@ The static `renderSubpixelBFI_*()` methods remain unchanged and always use Fixed
 - **Distributed phase scheduling** — per-BFI natural cycle (1 upper + N lowers) with automatic duty derivation; optional Bresenham-even global-cycle mode for advanced use; legacy FixedMask mode preserved as default
 - **FastLED integration** — works alongside FastLED CRGB buffers with GRB byte-order handling
 - **Platform-agnostic core** — runs on Teensy 4.x, ESP32, and any Arduino-compatible board with sufficient RAM
+- **Implicit phase timing on NeoPixel-class LEDs** — SK6812/WS2812 transmission time acts as a natural phase timer; faster SPI chipsets (APA102, SK9822, HD108, etc.) require explicit timing control (see [Rendering Model § 6.2](tools/README_RENDERING_MODEL.md))
 
 ## Quick Start
 

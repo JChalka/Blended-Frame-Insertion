@@ -230,6 +230,8 @@ For NeoPixel-protocol LEDs (~800 kHz class), the number of blended frames that c
 
 For SPI / high-speed LEDs (≥10 MHz), the data transfer is fast enough that the bottleneck shifts to per-cycle computation throughput on the MCU.
 
+> **Phase timing note:** The current reference implementation relies on SK6812 transmission time (~800 kHz–1.12 MHz per bit) as an implicit phase timer — each `showLEDs()` call takes long enough that phases are naturally spaced at consistent intervals without explicit timing control. For faster LED chipsets (≥10 MHz SPI class such as APA102, SK9822, HD108, etc.), the transmission completes in a fraction of the time, and the phase cadence becomes dominated by loop jitter and computation variance. In these cases, **explicit phase timing** (e.g. a hardware timer interrupt or `delayMicroseconds()` guard) is required to ensure consistent inter-phase intervals. Without it, uneven phase spacing will cause visible flicker and incorrect temporal blend ratios.
+
 On dual-core architectures (ESP32), the render loop should spin on a dedicated core with data preparation (LUT lookups, blend computation, incoming data processing) running on the other core. This separation is critical for sustaining ≥600 Hz LED refresh (≥120 Hz perceived) without frame drops.
 
 ### 6.3 Known High-FPS Parallel Output Drivers
@@ -283,15 +285,31 @@ Any device capable of the following should be able to drive the temporal BFI sys
 - **Processing**: Fast enough to process incoming data and compute blended output within the per-cycle budget
 - **Dual-core preferred**: Dedicated render core + data processing core for sustained high frame rates
 
-### 6.5 Data-Line Latch / Power-Detect Circuit
+### 6.5 Fail-Safe: Stale-Frame Protection
 
 Because the BFI render loop continuously alternates between upper and floor frames, the LEDs always hold the contents of whichever sub-frame was most recently transmitted. If the MCU loses power, crashes, or otherwise stops driving the data lines while the LED supply remains live, the strip will latch the last transmitted frame indefinitely. Depending on where in the cycle the output stopped, this could be the upper frame (full brightness), the floor frame (dim), or a partially written buffer — any of which may be visually jarring and electrically wasteful.
 
-**Recommended mitigation:** add a power-detect latch circuit on the LED data output line(s). The circuit monitors the MCU supply rail (or a GPIO "heartbeat" signal) and, when the MCU is detected as absent or non-responsive, pulls the data line low for longer than the LED reset period (~80 µs for WS2812/SK6812). This forces the strip to latch an all-zero (black) frame, clearing the display.
+Three mitigation approaches are outlined below, roughly in order of increasing suitability for larger installations.
+
+#### Option A — Data-Line Reset Circuit (small setups)
+
+Add a power-detect latch circuit on the LED data output line(s). The circuit monitors the MCU supply rail (or a GPIO "heartbeat" signal) and, when the MCU is detected as absent or non-responsive, pulls the data line low for longer than the LED reset period (~80 µs for WS2812/SK6812). This forces the strip to latch an all-zero (black) frame, clearing the display.
 
 A minimal implementation is a single N-channel MOSFET or open-drain buffer with its gate/enable tied to the MCU power rail through a voltage divider or supervisor IC. When the rail drops, the MOSFET releases and a pull-down resistor holds the data line low. More robust designs use a dedicated voltage supervisor (e.g. TPS3839) with a watchdog timeout, so even a hung MCU that keeps its rail alive but stops toggling data will trigger the latch-off.
 
-This is not strictly required for correct BFI operation, but is strongly recommended for any installation where the LED power supply and MCU power supply are independently switched or fused.
+This approach works well for small to moderate strip counts where each data line can be individually gated. It becomes impractical at scale (dozens of parallel data lines) because each line needs its own reset circuit.
+
+#### Option B — PSU Kill on Transmission Timeout (large setups, recommended)
+
+Rather than resetting individual data lines, disable the LED power supply entirely when the MCU stops transmitting. A heartbeat GPIO (toggled every frame by the render loop) feeds a simple watchdog — either a discrete RC + comparator / voltage supervisor, or a small supervisory MCU (ATtiny, etc.). If the heartbeat stops for longer than a configurable timeout (e.g. 50–100 ms), the watchdog de-asserts the PSU enable line, cutting power to all LED strips simultaneously.
+
+This is the more sensible approach for setups with many parallel data lines because a single watchdog protects the entire installation regardless of strip count. Re-enabling is automatic once the heartbeat resumes (or requires a manual reset, depending on the supervisor design).
+
+#### Option C — Combined (belt-and-suspenders)
+
+Use PSU-kill as the primary protection and add data-line reset circuits on a small number of critical strips (e.g. those visible during boot or power-on sequencing) so they blank immediately rather than waiting for the PSU timeout to expire.
+
+None of these are strictly required for correct BFI operation, but at least one is strongly recommended for any installation where the LED power supply and MCU power supply are independently switched or fused.
 
 ## 7. Known Limitations & Design Decisions
 
