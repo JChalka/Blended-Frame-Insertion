@@ -1,0 +1,39 @@
+{
+  "channels": {
+    "R": {
+      "points": 130815,
+      "measured_state_points": 130815,
+      "max_estimated_nobfi_Y": 154.670592,
+      "nonzero_points": 256,
+      "ladder_states": 130815,
+      "monotonic_states": 50371
+    },
+    "G": {
+      "points": 130815,
+      "measured_state_points": 130815,
+      "max_estimated_nobfi_Y": 566.278306,
+      "nonzero_points": 256,
+      "ladder_states": 130815,
+      "monotonic_states": 50266
+    },
+    "B": {
+      "points": 130815,
+      "measured_state_points": 130815,
+      "max_estimated_nobfi_Y": 129.64935,
+      "nonzero_points": 256,
+      "ladder_states": 130815,
+      "monotonic_states": 49824
+    },
+    "W": {
+      "points": 130815,
+      "measured_state_points": 130815,
+      "max_estimated_nobfi_Y": 1543.643989,
+      "nonzero_points": 256,
+      "ladder_states": 130815,
+      "monotonic_states": 48919
+    }
+  },
+  "sources": {
+    "total_rows": 523260
+  }
+}
