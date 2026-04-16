@@ -279,9 +279,13 @@ Generate a True16 patch plan (`temporal_lut_tools` or `generate_patch_plan_true1
 
 Use `rgbw_lut_gui.py` (or the CLI `build_measured_rgbw_lut.py`) to build a 3D cube LUT from measured RGBW patches. The solver fits measured RGBW→XYZ basis vectors with bounded ΔE and hue-shift constraints, supporting both RGBW strips (with measured white optimization) and RGB-only exports. Output formats include:
 
-- **3D cube headers** — flat C arrays for on-device trilinear interpolation
+- **3D cube headers** — PROGMEM C arrays for on-device trilinear interpolation
 - **Binary cubes** — raw uint16 for PSRAM/SD/QSPI flash loading
 - **1D calibration headers** — per-channel correction in the same format as the temporal ladder calibration
+
+### 6. Import External 3D LUTs (optional)
+
+If you have an RGB 3D LUT from an external calibration tool (DisplayCAL, DaVinci Resolve, ArgyllCMS, etc.), use `cube_to_header.py` to convert a standard `.cube` file into a CubeLUT3D-compatible binary and/or PROGMEM C++ header. This lets you use any display profiling workflow — not just the built-in RGBW capture pipeline — to produce the 3D color correction cube that the library loads at runtime.
 
 ## Tools
 
@@ -291,7 +295,8 @@ Host-side Python tools supporting the calibration and LUT-building pipeline. All
 |------|-------------|
 | [Rendering Model & Interpolation Pipeline](tools/README_RENDERING_MODEL.md) | Reference document — physical BFI rendering model, temporal blend equations, 5-axis synthesis-dominant interpolation, monotonic clamping, progressive registration, and hardware timing. |
 | [Host Calibration GUI](tools/host_calibration_gui/) | Tkinter application that drives the Teensy\_Temporal\_Calibration sketch and an ArgyllCMS colorimeter (`spotread`) to capture fill8, blend8, and Fill16 LED state measurements. Supports plan import/export, pause/resume, and progress reports. |
-| [RGBW Capture Analysis & LUT Builder](tools/rgbw_lut_builder/) | CLI + GUI toolset for analyzing RGBW capture data, fitting measured RGBW→XYZ basis vectors, building 3D cube LUTs (C header and binary), and exporting 1D calibration headers. Includes CIE 1931 chromaticity plotting, white-slice analysis, histogram visualization, and a 3D cube viewer. |
+| [RGBW Capture Analysis & LUT Builder](tools/rgbw_lut_builder/) | CLI + GUI toolset for analyzing RGBW capture data, fitting measured RGBW→XYZ basis vectors, building 3D cube LUTs (PROGMEM C header and binary), and exporting 1D calibration headers. Includes CIE 1931 chromaticity plotting, white-slice analysis, histogram visualization, and a 3D cube viewer. |
+| [Cube to Header Converter](tools/cube_to_header/) | CLI tool to convert standard `.cube` 3D LUT files (from DisplayCAL, Resolve, ArgyllCMS, etc.) into CubeLUT3D-compatible binary and PROGMEM C++ headers. Supports RGB and RGBW cubes. |
 | [Temporal Brightness Visualizer](tools/temporal_brightness_visualizer/) | Standalone visualizer for temporal monotonic ladders and 16-bit brightness distribution. Generates interactive HTML reports with per-channel charts. |
 | [Temporal LUT Tools](tools/temporal_lut_tools/) | Core CLI + GUI for the temporal ladder pipeline — capture-plan generation, solver-header export, precomputed-header export, transfer-curve generation, and calibration-header export. |
 | [Temporal Ladder Family Viewer](tools/temporal_ladder_family_viewer/) | Per-family drill-down viewer for temporal LUT outputs — inspect individual value/BFI families, monotonicity, and inter-family transitions. |

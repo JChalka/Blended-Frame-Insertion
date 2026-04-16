@@ -168,6 +168,16 @@ The combined dataset (pruned real captures + interpolated synthetic captures) fe
 
 The solver consumes the state-space XYZ data and produces the firmware artifacts (.h headers with `PROGMEM` arrays) that the Teensy loads at boot.
 
+### 4.1 3D Color Correction Cubes
+
+For full-gamut color correction beyond per-channel 1D calibration, the pipeline supports 3D cube LUTs loaded through the `CubeLUT3D` interface. Two paths exist:
+
+- **Measured RGBW cubes** — Built by `rgbw_lut_gui.py` / `build_measured_rgbw_lut.py` from colorimeter-measured RGBW patch sets. These capture the LED hardware's actual color response and produce RGBW (4-channel) cubes optimized for white-channel extraction. Headers are emitted with `PROGMEM` to reside in flash.
+
+- **External `.cube` files** — Standard RGB 3D LUTs from any profiling tool (DisplayCAL, DaVinci Resolve, ArgyllCMS, CalMAN, etc.) can be converted to CubeLUT3D-compatible binary or PROGMEM headers via `cube_to_header.py`. This allows users to leverage existing display calibration workflows without requiring the full RGBW capture pipeline.
+
+Both paths produce data in the same interleaved Q16 format consumed by `CubeLUT3D::attach()` and `CubeLUT3D::loadFromFileBuffer()`.
+
 ## 5. Diagnostic Metrics
 
 ### 5.1 Outlier Detection Passes
