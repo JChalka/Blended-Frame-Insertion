@@ -454,9 +454,16 @@ void SolverRuntime::setCycleLength(uint8_t len)
 bool SolverRuntime::advanceTick()
 {
     ++m_tick;
-    const uint8_t cl = (m_phaseMode == PhaseMode::FixedMask)
-                        ? SOLVER_FIXED_BFI_LEVELS
-                        : m_cycleLength;
+    // For FixedMask the cycle boundary is every SOLVER_FIXED_BFI_LEVELS ticks.
+    // For Distributed, there is no single global cycle — each BFI level has
+    // its own (bfi+1) length, so we report a boundary at the LCM-like
+    // interval of SOLVER_FIXED_BFI_LEVELS (matches the legacy cadence).
+    // For DistributedGlobal, use the configured m_cycleLength.
+    uint8_t cl;
+    switch (m_phaseMode) {
+        case PhaseMode::DistributedGlobal: cl = m_cycleLength; break;
+        default:                           cl = SOLVER_FIXED_BFI_LEVELS; break;
+    }
     return (m_tick % cl) == 0;
 }
 
@@ -469,7 +476,9 @@ bool SolverRuntime::channelActiveOnCurrentTick(uint8_t bfi) const
 {
     if (m_phaseMode == PhaseMode::FixedMask)
         return channelOnPhase(bfi, (uint8_t)(m_tick % SOLVER_FIXED_BFI_LEVELS));
-    return channelOnTickDistributed(bfi, m_tick, m_cycleLength);
+    if (m_phaseMode == PhaseMode::Distributed)
+        return channelOnTickPerBfi(bfi, m_tick);
+    return channelOnTickDistributedGlobal(bfi, m_tick, m_cycleLength);
 }
 
 // ============================================================================
@@ -488,11 +497,16 @@ static void fillPhaseTable(bool* table, PhaseMode mode, uint32_t tick,
         const uint8_t phaseBit = (uint8_t)(1u << (phase & 0x07u));
         for (uint8_t b = 0; b < SOLVER_FIXED_BFI_LEVELS; ++b)
             table[b] = (PHASE_EMIT_MASK[b] & phaseBit) != 0;
+    } else if (mode == PhaseMode::Distributed) {
+        // Per-BFI natural cycle: upper when (tick % (bfi+1)) == 0.
+        for (uint8_t b = 0; b < MAX_SUPPORTED_CYCLE_LENGTH; ++b)
+            table[b] = channelOnTickPerBfi(b, tick);
     } else {
+        // DistributedGlobal: Bresenham across fixed global cycle.
         const uint8_t cl = (cycleLength < MAX_SUPPORTED_CYCLE_LENGTH)
                             ? cycleLength : MAX_SUPPORTED_CYCLE_LENGTH;
         for (uint8_t b = 0; b < cl; ++b)
-            table[b] = channelOnTickDistributed(b, tick, cycleLength);
+            table[b] = channelOnTickDistributedGlobal(b, tick, cycleLength);
     }
 }
 

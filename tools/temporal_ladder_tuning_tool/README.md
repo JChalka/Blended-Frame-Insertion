@@ -72,6 +72,31 @@ python temporal_ladder_tuning_tool.py interpolate-captures \
     --interpolated-capture-out <WORK_DIR>/interpolated/plan_capture_interpolated.csv
 ```
 
+#### Phase distribution mode
+
+The `interpolate-captures` subcommand accepts `--phase-mode` to match the
+firmware's phase distribution setting:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--phase-mode` | `fixedmask` | `fixedmask` = legacy 5-phase bitmask (`PHASE_EMIT_MASK`); `distributed` = 1 upper frame per cycle of length bfi+1 |
+| `--max-bfi` | 4 | Maximum BFI level to synthesize in dense mode |
+
+In distributed mode each BFI level has its own implicit cycle length
+(`bfi + 1`): BFI 1 → `UL`, BFI 2 → `ULL`, BFI 3 → `ULLL`, etc. The plan row
+structure is unchanged — no `high_count_*` or `cycle_length` fields are added,
+so all downstream tools continue to work unmodified.
+
+```bash
+# Distributed mode with BFI 0..7:
+python temporal_ladder_tuning_tool.py interpolate-captures \
+    --capture-dir              <PRUNED_OUTPUT_DIR> \
+    --target-plan-dir          <RAW_CAPTURE_DIR> \
+    --phase-mode               distributed \
+    --max-bfi                  7 \
+    --interpolated-capture-out <WORK_DIR>/interpolated/plan_capture_interpolated.csv
+```
+
 ### Combine captures
 
 ```bash

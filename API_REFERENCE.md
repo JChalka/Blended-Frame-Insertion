@@ -47,7 +47,7 @@
 
 | Kind | Signature | Description |
 |------|-----------|-------------|
-| enum | `enum class PhaseMode { FixedMask, Distributed }` |  |
+| enum | `enum class PhaseMode { FixedMask, Distributed, DistributedGlobal }` |  |
 | enum | `enum class PixelLayout { RGB, RGBW }` |  |
 | enum | `enum class WhitePolicy { Disabled, NearNeutralOnly, AlwaysAllowed, WhitePriority, MeasuredOptimal }` |  |
 | using | `using CalibrationFn = uint16_t (*)(uint16_t q16, uint8_t channel)` |  |
@@ -66,9 +66,11 @@
 | class | `class SolverRuntime` |  |
 | inline function | `uint16_t applyScaleQ8(uint16_t q16, uint16_t scaleQ8)` |  |
 | inline function | `bool channelOnPhase(uint8_t bfi, uint8_t phase)` |  |
-| inline function | `bool channelOnTickDistributed(uint8_t bfi, uint32_t tick, uint8_t cycleLength)` |  |
+| inline function | `bool channelOnTickDistributedGlobal(uint8_t bfi, uint32_t tick, uint8_t cycleLength)` |  |
+| inline function | `bool channelOnTickPerBfi(uint8_t bfi, uint32_t tick)` |  |
 | inline function | `uint8_t clampBfi(uint8_t bfi)` |  |
 | inline function | `uint16_t invCycleQ8ForBfi(uint8_t bfi, uint8_t cycleLength)` |  |
+| inline function | `uint16_t invCycleQ8ForBfiPerBfi(uint8_t bfi)` |  |
 | inline function | `size_t lutIndexForSize(uint16_t q16, uint16_t lutSize)` |  |
 | inline function | `uint16_t min3U16(uint16_t a, uint16_t b, uint16_t c)` |  |
 | inline function | `uint16_t mulQ16(uint16_t a, uint16_t b)` |  |

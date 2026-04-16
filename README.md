@@ -57,19 +57,34 @@ The perceived output integrates over the full cycle, producing fine-grained brig
 
 ### Phase Distribution Modes
 
-The library supports two phase distribution modes that control *when* upper vs lower frames are emitted within a cycle:
+The library supports three phase distribution modes that control *when* upper vs lower frames are emitted within a cycle:
 
 **FixedMask (legacy, default)** — A compile-time 5-bit bitmask (`PHASE_EMIT_MASK`) determines which of the 5 fixed phases show the upper value. This is backward-compatible with all existing captures, calibration data, and the HyperTeensy production sketch. However, some BFI levels produce uneven clustering — for example BFI 3 yields an `ULLUL` pattern where two upper frames appear consecutively instead of being maximally spaced. The resulting brightness levels are distinct and measurably correct, but the cadence doesn't produce a true 1:1 interleaved blend ratio at every level.
 
-**Distributed (new)** — A Bresenham-style algorithm distributes upper and lower frames as evenly as possible across a configurable cycle length (2–16). For any BFI level, no two upper frames appear back-to-back unless there are more upper frames than lower. This produces the intended temporal blend cadence where the eye integrates evenly-spaced alternating levels. The cycle length is no longer fixed at 5 — it can be set to any value via `setCycleLength()`, allowing finer BFI granularity (e.g. cycle length 8 gives BFI levels 0–7, cycle length 10 gives 0–9).
+**Distributed (recommended)** — Each BFI level defines its own natural cycle of length `bfi + 1`: one upper frame followed by `bfi` lower frames. This produces a simple, predictable pattern:
+
+| BFI | Pattern | Cycle | Duty (Q8) |
+|-----|---------|-------|-----------|
+| 0   | `U`     | 1     | 256       |
+| 1   | `UL`    | 2     | 128       |
+| 2   | `ULL`   | 3     | 85        |
+| 3   | `ULLL`  | 4     | 64        |
+| 4   | `ULLLL` | 5     | 51        |
+
+No configuration is needed — the cycle length is derived automatically from the BFI level. The number of usable BFI levels is bounded only by `MAX_SUPPORTED_CYCLE_LENGTH` (16), giving BFI 0–15.
+
+**DistributedGlobal (advanced)** — A Bresenham-style algorithm distributes upper and lower frames as evenly as possible across a configurable global cycle length (2–16). For any BFI level, no two upper frames appear back-to-back unless there are more upper frames than lower. The cycle length is set via `setCycleLength()` (e.g. cycle length 8 gives BFI levels 0–7). This mode is useful when a uniform global cadence is required but is not needed for typical use.
 
 ```cpp
 // Legacy mode (default — no changes needed for existing code):
 solver.setPhaseMode(PhaseMode::FixedMask);
 
-// New distributed mode with configurable cycle length:
+// Recommended distributed mode (per-BFI natural cycle):
 solver.setPhaseMode(PhaseMode::Distributed);
-solver.setCycleLength(8);  // 8-phase cycle → BFI 0..7
+
+// Advanced: Bresenham-even global cycle:
+solver.setPhaseMode(PhaseMode::DistributedGlobal);
+solver.setCycleLength(8);  // 8-phase global cycle → BFI 0..7
 
 // Render loop uses the internal tick counter:
 solver.renderBFI_RGBW(upper, floor, bfiG, bfiR, bfiB, bfiW, display, count);
@@ -86,7 +101,7 @@ The static `renderSubpixelBFI_*()` methods remain unchanged and always use Fixed
 - **Calibration-aware pipeline** — optional per-channel Q16 input calibration for device-specific correction
 - **Transfer curves** — pluggable gamma/tone-mapping curves (linear, gamma, BT.1886, HLG, PQ, sRGB, toe-gamma)
 - **Precomputed or runtime solving** — LUTs can be computed at boot or loaded from PROGMEM headers
-- **Distributed phase scheduling** — Bresenham-even upper/lower frame spacing with configurable cycle length (2–16), replacing the fixed 5-phase bitmask cadence; legacy FixedMask mode preserved as default
+- **Distributed phase scheduling** — per-BFI natural cycle (1 upper + N lowers) with automatic duty derivation; optional Bresenham-even global-cycle mode for advanced use; legacy FixedMask mode preserved as default
 - **FastLED integration** — works alongside FastLED CRGB buffers with GRB byte-order handling
 - **Platform-agnostic core** — runs on Teensy 4.x, ESP32, and any Arduino-compatible board with sufficient RAM
 
@@ -157,8 +172,8 @@ void loop() {
 | `setCubeLUT3DEnabled(bool)` | Enable/disable the 3D cube LUT stage in the pipeline |
 | `cubeLUT3DEnabled()` | Query whether the cube LUT stage is active |
 | `applyCubeLUT3D(rQ16, gQ16, bQ16)` | Trilinear lookup through the attached cube, returns `RgbwTargets` |
-| `setPhaseMode(mode)` | Set phase distribution: `FixedMask` (legacy) or `Distributed` (Bresenham-even) |
-| `setCycleLength(len)` | Set cycle length for Distributed mode (2–16) |
+| `setPhaseMode(mode)` | Set phase distribution: `FixedMask` (legacy), `Distributed` (per-BFI cycle), or `DistributedGlobal` (Bresenham-even) |
+| `setCycleLength(len)` | Set global cycle length for DistributedGlobal mode (2–16) |
 | `advanceTick()` | Step the internal tick counter; returns `true` on cycle boundary |
 | `resetTick()` | Reset the internal tick counter to 0 |
 | `channelActiveOnCurrentTick(bfi)` | Query whether a BFI level shows upper on the current tick |

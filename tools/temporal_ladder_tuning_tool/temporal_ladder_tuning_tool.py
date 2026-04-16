@@ -20,6 +20,47 @@ DEFAULT_TARGET_PLAN_GLOBS = ["plan_capture_advanced_*.csv"]
 DEFAULT_INTERPOLATED_CAPTURE_GLOBS = ["plan_capture_interpolated*.csv"]
 DEFAULT_CAPTURE_SUMMARY_PRUNE_PASSES = 4
 CHANNEL_INDEX = {channel: idx for idx, channel in enumerate(CHANNELS)}
+
+# Phase distribution mode constants — must match TemporalBFI.h.
+PHASE_MODE_FIXEDMASK = "fixedmask"
+PHASE_MODE_DISTRIBUTED = "distributed"
+MAX_SUPPORTED_CYCLE_LENGTH = 16
+
+# Legacy 5-phase bitmask table from TemporalBFI.h.
+_PHASE_EMIT_MASK = [0x1F, 0x1B, 0x15, 0x09, 0x01]
+_FIXED_CYCLE_LENGTH = len(_PHASE_EMIT_MASK)  # 5
+
+
+def upper_count_for_bfi(bfi: int, phase_mode: str = PHASE_MODE_FIXEDMASK) -> int:
+    """Number of upper-value phases in one cycle for a given BFI level.
+
+    FixedMask:   popcount of PHASE_EMIT_MASK[bfi] (5-phase cycle).
+    Distributed: always 1 upper frame per cycle of length bfi + 1.
+      BFI 0 → U          (cycle 1, duty 100%)
+      BFI 1 → U L        (cycle 2, duty 50%)
+      BFI 2 → U L L      (cycle 3, duty 33%)
+      BFI 3 → U L L L    (cycle 4, duty 25%)
+    """
+    if phase_mode == PHASE_MODE_FIXEDMASK:
+        if bfi < 0 or bfi >= len(_PHASE_EMIT_MASK):
+            return 0
+        return bin(_PHASE_EMIT_MASK[bfi]).count("1")
+    # Distributed: 1 upper frame, cycle = bfi + 1
+    return 1
+
+
+def cycle_length_for_bfi(bfi: int, phase_mode: str = PHASE_MODE_FIXEDMASK) -> int:
+    """Effective cycle length for a given BFI level."""
+    if phase_mode == PHASE_MODE_FIXEDMASK:
+        return _FIXED_CYCLE_LENGTH
+    return max(1, bfi + 1)
+
+
+def inv_cycle_q8_for_bfi(bfi: int, phase_mode: str = PHASE_MODE_FIXEDMASK) -> int:
+    """Duty-cycle scaling factor (Q8) — matches C++ INV_CYCLE_Q8 / invCycleQ8ForBfi."""
+    cl = cycle_length_for_bfi(bfi, phase_mode)
+    uc = upper_count_for_bfi(bfi, phase_mode)
+    return (uc * 256 + cl // 2) // cl
 DEFAULT_SPILL_DIR = Path(os.environ.get("TEMPORAL_LADDER_TUNING_SPILL_DIR", "./temporal_ladder_tuning"))
 DEFAULT_INTERPOLATED_CAPTURE_DIR = DEFAULT_SPILL_DIR / "interpolated_captures"
 DEFAULT_COMBINED_CAPTURE_DIR = DEFAULT_SPILL_DIR / "combined_captures"
@@ -2649,7 +2690,9 @@ def cmd_interpolate_captures(args: argparse.Namespace) -> int:
     out_path = Path(args.interpolated_capture_out)
     _validate_interpolated_output_path(capture_dir, out_path)
     channels = _resolve_channels(args.channels)
-    target_plan_rows = _build_dense_state_rows(channels, args.max_bfi)
+    phase_mode = getattr(args, "phase_mode", PHASE_MODE_FIXEDMASK)
+    effective_max_bfi = args.max_bfi
+    target_plan_rows = _build_dense_state_rows(channels, effective_max_bfi)
     target_plan_paths = None
     if args.target_plan_dir or args.missing_plan:
         target_plan_paths = _resolve_target_plan_paths(args)
@@ -2662,11 +2705,12 @@ def cmd_interpolate_captures(args: argparse.Namespace) -> int:
         target_plan_rows=target_plan_rows,
         target_plan_paths=target_plan_paths,
     )
+    print(f"Phase mode: {phase_mode}  max_bfi: {effective_max_bfi}")
     print(f"Interpolated capture source dir: {capture_dir}")
     if target_plan_paths is not None:
         print(f"Target plan files: {len(target_plan_paths)}")
     else:
-        print(f"Target dense channels: {', '.join(channels)} max_bfi={args.max_bfi}")
+        print(f"Target dense channels: {', '.join(channels)} max_bfi={effective_max_bfi}")
     print(f"Source files scanned: {stats.source_files_scanned}")
     print(f"Source rows loaded: {stats.source_rows_loaded}")
     print(f"Source states repaired: {stats.source_states_repaired}")
@@ -2748,6 +2792,7 @@ def build_parser() -> argparse.ArgumentParser:
     interpolate.add_argument("--capture-input-globs", nargs="*", default=DEFAULT_PRUNED_CAPTURE_GLOBS, help="Glob patterns for source pruned capture chunks")
     interpolate.add_argument("--channels", nargs="*", default=["ALL"], help="Channels to synthesize in dense mode: R G B W or ALL")
     interpolate.add_argument("--max-bfi", type=int, default=4, help="Maximum BFI level to synthesize in dense mode")
+    interpolate.add_argument("--phase-mode", choices=[PHASE_MODE_FIXEDMASK, PHASE_MODE_DISTRIBUTED], default=PHASE_MODE_FIXEDMASK, help="Phase distribution mode: fixedmask (legacy 5-phase bitmask) or distributed (1 upper per bfi+1 cycle)")
     interpolate.add_argument("--missing-plan", help="Optional single target plan CSV. Pass the original plan_capture_advanced_*.csv to synthesize every state missing from the pruned captures; passing a recapture plan only synthesizes that smaller flagged subset")
     interpolate.add_argument("--target-plan-dir", help="Directory containing original capture-plan or capture-report CSVs to expand against as the desired full state set")
     interpolate.add_argument("--target-plan-globs", nargs="*", default=DEFAULT_TARGET_PLAN_GLOBS, help="Glob patterns used with --target-plan-dir to collect the full desired state set")

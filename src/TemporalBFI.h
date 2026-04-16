@@ -45,8 +45,9 @@ enum class PixelLayout : uint8_t { RGB = 3, RGBW = 4 };
 
 // Phase distribution mode for BFI rendering.
 enum class PhaseMode : uint8_t {
-    FixedMask   = 0,   // Legacy 5-phase bitmask (PHASE_EMIT_MASK)
-    Distributed = 1    // Bresenham-distributed even spacing
+    FixedMask        = 0,   // Legacy 5-phase bitmask (PHASE_EMIT_MASK)
+    Distributed      = 1,   // Per-BFI cycle: 1 upper + bfi lowers (cycle = bfi+1)
+    DistributedGlobal = 2   // Bresenham-distributed even spacing across a fixed global cycle
 };
 
 struct RgbwTargets {
@@ -175,12 +176,12 @@ inline bool channelOnPhase(uint8_t bfi, uint8_t phase)
     return (PHASE_EMIT_MASK[clampBfi(bfi)] & (1u << (phase & 0x07u))) != 0u;
 }
 
-// Bresenham-distributed phase determination.
+// Bresenham-distributed phase determination (global fixed cycle).
 // For a given BFI level and cycle length, distributes upper and lower
 // frames as evenly as possible across the cycle — no consecutive
 // clustering of upper frames.
 // Stateless — depends only on (bfi, tick, cycleLength).
-inline bool channelOnTickDistributed(uint8_t bfi, uint32_t tick, uint8_t cycleLength)
+inline bool channelOnTickDistributedGlobal(uint8_t bfi, uint32_t tick, uint8_t cycleLength)
 {
     if (bfi == 0) return true;
     if (cycleLength == 0 || bfi >= cycleLength) return false;
@@ -190,7 +191,22 @@ inline bool channelOnTickDistributed(uint8_t bfi, uint32_t tick, uint8_t cycleLe
              ((uint16_t)t * bfi / cycleLength));
 }
 
-// Dynamic duty-cycle scaling for arbitrary cycle lengths.
+// Per-BFI distributed phase determination.
+// Each BFI level has its own natural cycle length of (bfi + 1):
+//   BFI 0 → U          (always upper)
+//   BFI 1 → U L        (cycle 2)
+//   BFI 2 → U L L      (cycle 3)
+//   BFI 3 → U L L L    (cycle 4)
+// Phase 0 of each cycle is always the upper frame.
+// Stateless — depends only on (bfi, tick).
+inline bool channelOnTickPerBfi(uint8_t bfi, uint32_t tick)
+{
+    if (bfi == 0) return true;
+    const uint8_t cycleLen = bfi + 1;
+    return (tick % cycleLen) == 0;
+}
+
+// Dynamic duty-cycle scaling for the DistributedGlobal mode.
 // Generalises the fixed INV_CYCLE_Q8[] table.
 // Result is Q8: upper-frame duty ratio × 256.
 inline uint16_t invCycleQ8ForBfi(uint8_t bfi, uint8_t cycleLength)
@@ -198,6 +214,14 @@ inline uint16_t invCycleQ8ForBfi(uint8_t bfi, uint8_t cycleLength)
     if (cycleLength == 0 || bfi >= cycleLength) return 0;
     return (uint16_t)(((uint16_t)(cycleLength - bfi) * 256u
                        + cycleLength / 2u) / cycleLength);
+}
+
+// Duty-cycle scaling for the per-BFI distributed mode.
+// Cycle = bfi + 1, upper count = 1.  Result is Q8.
+inline uint16_t invCycleQ8ForBfiPerBfi(uint8_t bfi)
+{
+    const uint8_t cl = bfi + 1u;
+    return (uint16_t)((256u + cl / 2u) / cl);
 }
 
 // ============================================================================
@@ -376,9 +400,14 @@ public:
     //   HyperTeensy production sketch.
     //
     // Distributed:
-    //   Bresenham-style even spacing of upper/lower frames within a
-    //   configurable cycle length.  Ensures no consecutive clustering
-    //   of upper frames that would skew the perceived temporal blend.
+    //   Per-BFI natural cycle: each BFI level N repeats a pattern of
+    //   1 upper frame followed by N lower frames (cycle = N+1).
+    //   BFI 0 → U, BFI 1 → UL, BFI 2 → ULL, BFI 3 → ULLL, etc.
+    //
+    // DistributedGlobal:
+    //   Bresenham-style spacing across a configurable global cycle
+    //   length.  Upper and lower frames are spread as evenly as
+    //   possible.  Requires setCycleLength().
 
     void setPhaseMode(PhaseMode mode);
     PhaseMode phaseMode() const { return m_phaseMode; }
