@@ -43,6 +43,12 @@ struct CalibrationProfile {
 
 enum class PixelLayout : uint8_t { RGB = 3, RGBW = 4 };
 
+// Phase distribution mode for BFI rendering.
+enum class PhaseMode : uint8_t {
+    FixedMask   = 0,   // Legacy 5-phase bitmask (PHASE_EMIT_MASK)
+    Distributed = 1    // Bresenham-distributed even spacing
+};
+
 struct RgbwTargets {
     uint16_t rQ16;
     uint16_t gQ16;
@@ -101,6 +107,10 @@ static constexpr uint8_t PHASE_EMIT_MASK[SOLVER_FIXED_BFI_LEVELS] = {
 static constexpr uint16_t INV_CYCLE_Q8[SOLVER_FIXED_BFI_LEVELS] = {
     256, 205, 154, 102, 51
 };
+
+// Maximum cycle length supported by the precomputed phase table
+// used in the instance render methods.
+static constexpr uint8_t MAX_SUPPORTED_CYCLE_LENGTH = 16;
 
 // ============================================================================
 // Q16 Math Helpers (inline — trivial one-liners)
@@ -163,6 +173,31 @@ inline uint8_t clampBfi(uint8_t bfi)
 inline bool channelOnPhase(uint8_t bfi, uint8_t phase)
 {
     return (PHASE_EMIT_MASK[clampBfi(bfi)] & (1u << (phase & 0x07u))) != 0u;
+}
+
+// Bresenham-distributed phase determination.
+// For a given BFI level and cycle length, distributes upper and lower
+// frames as evenly as possible across the cycle — no consecutive
+// clustering of upper frames.
+// Stateless — depends only on (bfi, tick, cycleLength).
+inline bool channelOnTickDistributed(uint8_t bfi, uint32_t tick, uint8_t cycleLength)
+{
+    if (bfi == 0) return true;
+    if (cycleLength == 0 || bfi >= cycleLength) return false;
+    const uint8_t t = (uint8_t)(tick % cycleLength);
+    // Lower at phase t when: floor((t+1)*bfi/C) > floor(t*bfi/C).
+    return !(((uint16_t)(t + 1) * bfi / cycleLength) >
+             ((uint16_t)t * bfi / cycleLength));
+}
+
+// Dynamic duty-cycle scaling for arbitrary cycle lengths.
+// Generalises the fixed INV_CYCLE_Q8[] table.
+// Result is Q8: upper-frame duty ratio × 256.
+inline uint16_t invCycleQ8ForBfi(uint8_t bfi, uint8_t cycleLength)
+{
+    if (cycleLength == 0 || bfi >= cycleLength) return 0;
+    return (uint16_t)(((uint16_t)(cycleLength - bfi) * 256u
+                       + cycleLength / 2u) / cycleLength);
 }
 
 // ============================================================================
@@ -332,6 +367,37 @@ public:
     /// missing, returns a passthrough (rQ16, gQ16, bQ16, 0).
     RgbwTargets applyCubeLUT3D(uint16_t rQ16, uint16_t gQ16, uint16_t bQ16) const;
 
+    // ----- Phase Mode / Tick Management -----
+    // Controls how BFI phases are distributed within a display cycle.
+    //
+    // FixedMask (default):
+    //   Uses the compile-time PHASE_EMIT_MASK bitmask with a 5-phase
+    //   cycle.  Backward-compatible with all existing captures and the
+    //   HyperTeensy production sketch.
+    //
+    // Distributed:
+    //   Bresenham-style even spacing of upper/lower frames within a
+    //   configurable cycle length.  Ensures no consecutive clustering
+    //   of upper frames that would skew the perceived temporal blend.
+
+    void setPhaseMode(PhaseMode mode);
+    PhaseMode phaseMode() const { return m_phaseMode; }
+
+    void setCycleLength(uint8_t len);
+    uint8_t cycleLength() const { return m_cycleLength; }
+
+    /// Advance the internal tick counter.
+    /// Returns true when the tick reaches a cycle boundary (start of a
+    /// new display cycle).
+    bool advanceTick();
+
+    void resetTick();
+    uint32_t currentTick() const { return m_tick; }
+
+    /// Check whether a channel with the given BFI level shows its upper
+    /// value on the current internal tick, using the configured mode.
+    bool channelActiveOnCurrentTick(uint8_t bfi) const;
+
     // ----- Pixel Commit -----
 
     static void commitPixelRGBW(
@@ -398,6 +464,33 @@ public:
         uint8_t* displayBuffer, uint16_t pixelCount,
         uint8_t phase);
 
+    // ----- Instance Render (uses internal tick/mode) -----
+    // Non-static render methods that use the configured PhaseMode,
+    // cycle length, and internal tick counter.  Call advanceTick()
+    // after each render to step the counter.
+
+    void renderBFI_RGBW(
+        const uint8_t* upperFrame, const uint8_t* floorFrame,
+        const uint8_t* bfiMapG, const uint8_t* bfiMapR,
+        const uint8_t* bfiMapB, const uint8_t* bfiMapW,
+        uint8_t* displayBuffer, uint16_t pixelCount) const;
+
+    void renderBFI_RGB(
+        const uint8_t* upperFrame, const uint8_t* floorFrame,
+        const uint8_t* bfiMapG, const uint8_t* bfiMapR,
+        const uint8_t* bfiMapB,
+        uint8_t* displayBuffer, uint16_t pixelCount) const;
+
+    void renderBFI_RGBW_Packed(
+        const uint8_t* upperFrame, const uint8_t* floorFrame,
+        const uint8_t* packedBfiMap,
+        uint8_t* displayBuffer, uint16_t pixelCount) const;
+
+    void renderBFI_RGB_Packed(
+        const uint8_t* upperFrame, const uint8_t* floorFrame,
+        const uint8_t* packedBfiMap,
+        uint8_t* displayBuffer, uint16_t pixelCount) const;
+
     // ----- LUT Header Dump -----
 
     void dumpLUTHeader(Print& out) const;
@@ -428,6 +521,11 @@ private:
     // 3D Cube LUT (non-owning pointer — caller owns the CubeLUT3D)
     const CubeLUT3D* m_cubeLUT = nullptr;
     bool m_cubeLUTEnabled = false;
+
+    // Phase mode / tick
+    PhaseMode m_phaseMode = PhaseMode::FixedMask;
+    uint8_t m_cycleLength = SOLVER_FIXED_BFI_LEVELS;
+    uint32_t m_tick = 0;
 
     // Solver config (owned directly — no external type dependency)
     PolicyConfig m_cfg;

@@ -436,6 +436,183 @@ void SolverRuntime::renderSubpixelBFI_RGB_Packed(
 }
 
 // ============================================================================
+// Phase Mode / Tick Management
+// ============================================================================
+
+void SolverRuntime::setPhaseMode(PhaseMode mode)
+{
+    m_phaseMode = mode;
+}
+
+void SolverRuntime::setCycleLength(uint8_t len)
+{
+    if (len < 2) len = 2;
+    if (len > MAX_SUPPORTED_CYCLE_LENGTH) len = MAX_SUPPORTED_CYCLE_LENGTH;
+    m_cycleLength = len;
+}
+
+bool SolverRuntime::advanceTick()
+{
+    ++m_tick;
+    const uint8_t cl = (m_phaseMode == PhaseMode::FixedMask)
+                        ? SOLVER_FIXED_BFI_LEVELS
+                        : m_cycleLength;
+    return (m_tick % cl) == 0;
+}
+
+void SolverRuntime::resetTick()
+{
+    m_tick = 0;
+}
+
+bool SolverRuntime::channelActiveOnCurrentTick(uint8_t bfi) const
+{
+    if (m_phaseMode == PhaseMode::FixedMask)
+        return channelOnPhase(bfi, (uint8_t)(m_tick % SOLVER_FIXED_BFI_LEVELS));
+    return channelOnTickDistributed(bfi, m_tick, m_cycleLength);
+}
+
+// ============================================================================
+// Instance Render (uses internal tick/mode)
+// ============================================================================
+
+// Precompute upper/lower decision for each BFI level on the current tick.
+static void fillPhaseTable(bool* table, PhaseMode mode, uint32_t tick,
+                           uint8_t cycleLength)
+{
+    for (uint8_t b = 0; b < MAX_SUPPORTED_CYCLE_LENGTH; ++b)
+        table[b] = false;
+
+    if (mode == PhaseMode::FixedMask) {
+        const uint8_t phase = (uint8_t)(tick % SOLVER_FIXED_BFI_LEVELS);
+        const uint8_t phaseBit = (uint8_t)(1u << (phase & 0x07u));
+        for (uint8_t b = 0; b < SOLVER_FIXED_BFI_LEVELS; ++b)
+            table[b] = (PHASE_EMIT_MASK[b] & phaseBit) != 0;
+    } else {
+        const uint8_t cl = (cycleLength < MAX_SUPPORTED_CYCLE_LENGTH)
+                            ? cycleLength : MAX_SUPPORTED_CYCLE_LENGTH;
+        for (uint8_t b = 0; b < cl; ++b)
+            table[b] = channelOnTickDistributed(b, tick, cycleLength);
+    }
+}
+
+static inline uint8_t clampBfiToTable(uint8_t bfi)
+{
+    return (bfi < MAX_SUPPORTED_CYCLE_LENGTH)
+               ? bfi : (uint8_t)(MAX_SUPPORTED_CYCLE_LENGTH - 1u);
+}
+
+void SolverRuntime::renderBFI_RGBW(
+    const uint8_t* upperFrame, const uint8_t* floorFrame,
+    const uint8_t* bfiMapG, const uint8_t* bfiMapR,
+    const uint8_t* bfiMapB, const uint8_t* bfiMapW,
+    uint8_t* displayBuffer, uint16_t pixelCount) const
+{
+    bool isUp[MAX_SUPPORTED_CYCLE_LENGTH];
+    fillPhaseTable(isUp, m_phaseMode, m_tick, m_cycleLength);
+
+    const uint8_t* src = upperFrame;
+    const uint8_t* flr = floorFrame;
+    uint8_t* dst = displayBuffer;
+
+    for (uint16_t i = 0; i < pixelCount; ++i)
+    {
+        dst[0] = isUp[clampBfiToTable(bfiMapG[i])] ? src[0] : (flr ? flr[0] : 0);
+        dst[1] = isUp[clampBfiToTable(bfiMapR[i])] ? src[1] : (flr ? flr[1] : 0);
+        dst[2] = isUp[clampBfiToTable(bfiMapB[i])] ? src[2] : (flr ? flr[2] : 0);
+        dst[3] = isUp[clampBfiToTable(bfiMapW[i])] ? src[3] : (flr ? flr[3] : 0);
+
+        src += 4;
+        if (flr) flr += 4;
+        dst += 4;
+    }
+}
+
+void SolverRuntime::renderBFI_RGB(
+    const uint8_t* upperFrame, const uint8_t* floorFrame,
+    const uint8_t* bfiMapG, const uint8_t* bfiMapR,
+    const uint8_t* bfiMapB,
+    uint8_t* displayBuffer, uint16_t pixelCount) const
+{
+    bool isUp[MAX_SUPPORTED_CYCLE_LENGTH];
+    fillPhaseTable(isUp, m_phaseMode, m_tick, m_cycleLength);
+
+    const uint8_t* src = upperFrame;
+    const uint8_t* flr = floorFrame;
+    uint8_t* dst = displayBuffer;
+
+    for (uint16_t i = 0; i < pixelCount; ++i)
+    {
+        dst[0] = isUp[clampBfiToTable(bfiMapG[i])] ? src[0] : (flr ? flr[0] : 0);
+        dst[1] = isUp[clampBfiToTable(bfiMapR[i])] ? src[1] : (flr ? flr[1] : 0);
+        dst[2] = isUp[clampBfiToTable(bfiMapB[i])] ? src[2] : (flr ? flr[2] : 0);
+
+        src += 3;
+        if (flr) flr += 3;
+        dst += 3;
+    }
+}
+
+void SolverRuntime::renderBFI_RGBW_Packed(
+    const uint8_t* upperFrame, const uint8_t* floorFrame,
+    const uint8_t* packedBfiMap,
+    uint8_t* displayBuffer, uint16_t pixelCount) const
+{
+    bool isUp[MAX_SUPPORTED_CYCLE_LENGTH];
+    fillPhaseTable(isUp, m_phaseMode, m_tick, m_cycleLength);
+
+    const uint8_t* src = upperFrame;
+    const uint8_t* flr = floorFrame;
+    uint8_t* dst = displayBuffer;
+    const uint8_t* pk = packedBfiMap;
+
+    for (uint16_t i = 0; i < pixelCount; ++i)
+    {
+        const uint8_t gr = pk[0];
+        const uint8_t bw = pk[1];
+
+        dst[0] = isUp[clampBfiToTable(gr >> 4)]       ? src[0] : (flr ? flr[0] : 0);
+        dst[1] = isUp[clampBfiToTable(gr & 0x0Fu)]    ? src[1] : (flr ? flr[1] : 0);
+        dst[2] = isUp[clampBfiToTable(bw >> 4)]        ? src[2] : (flr ? flr[2] : 0);
+        dst[3] = isUp[clampBfiToTable(bw & 0x0Fu)]    ? src[3] : (flr ? flr[3] : 0);
+
+        src += 4;
+        if (flr) flr += 4;
+        dst += 4;
+        pk += PACKED_BFI_BYTES_PER_PIXEL;
+    }
+}
+
+void SolverRuntime::renderBFI_RGB_Packed(
+    const uint8_t* upperFrame, const uint8_t* floorFrame,
+    const uint8_t* packedBfiMap,
+    uint8_t* displayBuffer, uint16_t pixelCount) const
+{
+    bool isUp[MAX_SUPPORTED_CYCLE_LENGTH];
+    fillPhaseTable(isUp, m_phaseMode, m_tick, m_cycleLength);
+
+    const uint8_t* src = upperFrame;
+    const uint8_t* flr = floorFrame;
+    uint8_t* dst = displayBuffer;
+    const uint8_t* pk = packedBfiMap;
+
+    for (uint16_t i = 0; i < pixelCount; ++i)
+    {
+        const uint8_t gr = pk[0];
+        const uint8_t bw = pk[1];
+
+        dst[0] = isUp[clampBfiToTable(gr >> 4)]       ? src[0] : (flr ? flr[0] : 0);
+        dst[1] = isUp[clampBfiToTable(gr & 0x0Fu)]    ? src[1] : (flr ? flr[1] : 0);
+        dst[2] = isUp[clampBfiToTable(bw >> 4)]        ? src[2] : (flr ? flr[2] : 0);
+
+        src += 3;
+        if (flr) flr += 3;
+        dst += 3;
+        pk += PACKED_BFI_BYTES_PER_PIXEL;
+    }
+}
+
+// ============================================================================
 // LUT Header Dump
 // ============================================================================
 

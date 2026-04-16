@@ -55,6 +55,30 @@ Each display cycle consists of `cycle_length` phases (default 5). Within one cyc
 
 The perceived output integrates over the full cycle, producing fine-grained brightness steps between adjacent 8-bit levels. A 4096-entry per-channel temporal ladder maps every Q16 (0–65535) target to the optimal `(value, bfi, lowerValue)` tuple, selected from physically measured LED states.
 
+### Phase Distribution Modes
+
+The library supports two phase distribution modes that control *when* upper vs lower frames are emitted within a cycle:
+
+**FixedMask (legacy, default)** — A compile-time 5-bit bitmask (`PHASE_EMIT_MASK`) determines which of the 5 fixed phases show the upper value. This is backward-compatible with all existing captures, calibration data, and the HyperTeensy production sketch. However, some BFI levels produce uneven clustering — for example BFI 3 yields an `ULLUL` pattern where two upper frames appear consecutively instead of being maximally spaced. The resulting brightness levels are distinct and measurably correct, but the cadence doesn't produce a true 1:1 interleaved blend ratio at every level.
+
+**Distributed (new)** — A Bresenham-style algorithm distributes upper and lower frames as evenly as possible across a configurable cycle length (2–16). For any BFI level, no two upper frames appear back-to-back unless there are more upper frames than lower. This produces the intended temporal blend cadence where the eye integrates evenly-spaced alternating levels. The cycle length is no longer fixed at 5 — it can be set to any value via `setCycleLength()`, allowing finer BFI granularity (e.g. cycle length 8 gives BFI levels 0–7, cycle length 10 gives 0–9).
+
+```cpp
+// Legacy mode (default — no changes needed for existing code):
+solver.setPhaseMode(PhaseMode::FixedMask);
+
+// New distributed mode with configurable cycle length:
+solver.setPhaseMode(PhaseMode::Distributed);
+solver.setCycleLength(8);  // 8-phase cycle → BFI 0..7
+
+// Render loop uses the internal tick counter:
+solver.renderBFI_RGBW(upper, floor, bfiG, bfiR, bfiB, bfiW, display, count);
+showLEDs();
+bool cycleEnd = solver.advanceTick();  // returns true on cycle boundary
+```
+
+The static `renderSubpixelBFI_*()` methods remain unchanged and always use FixedMask — existing sketches don't need modification. The new instance `renderBFI_*()` methods use the configured phase mode and internal tick counter.
+
 ## Features
 
 - **True 16-bit rendering** — 4096+ distinct brightness levels per channel from 8-bit LED hardware
@@ -62,6 +86,7 @@ The perceived output integrates over the full cycle, producing fine-grained brig
 - **Calibration-aware pipeline** — optional per-channel Q16 input calibration for device-specific correction
 - **Transfer curves** — pluggable gamma/tone-mapping curves (linear, gamma, BT.1886, HLG, PQ, sRGB, toe-gamma)
 - **Precomputed or runtime solving** — LUTs can be computed at boot or loaded from PROGMEM headers
+- **Distributed phase scheduling** — Bresenham-even upper/lower frame spacing with configurable cycle length (2–16), replacing the fixed 5-phase bitmask cadence; legacy FixedMask mode preserved as default
 - **FastLED integration** — works alongside FastLED CRGB buffers with GRB byte-order handling
 - **Platform-agnostic core** — runs on Teensy 4.x, ESP32, and any Arduino-compatible board with sufficient RAM
 
@@ -132,6 +157,15 @@ void loop() {
 | `setCubeLUT3DEnabled(bool)` | Enable/disable the 3D cube LUT stage in the pipeline |
 | `cubeLUT3DEnabled()` | Query whether the cube LUT stage is active |
 | `applyCubeLUT3D(rQ16, gQ16, bQ16)` | Trilinear lookup through the attached cube, returns `RgbwTargets` |
+| `setPhaseMode(mode)` | Set phase distribution: `FixedMask` (legacy) or `Distributed` (Bresenham-even) |
+| `setCycleLength(len)` | Set cycle length for Distributed mode (2–16) |
+| `advanceTick()` | Step the internal tick counter; returns `true` on cycle boundary |
+| `resetTick()` | Reset the internal tick counter to 0 |
+| `channelActiveOnCurrentTick(bfi)` | Query whether a BFI level shows upper on the current tick |
+| `renderBFI_RGBW(...)` | Instance render using configured phase mode + internal tick (RGBW, separate BFI maps) |
+| `renderBFI_RGB(...)` | Instance render using configured phase mode + internal tick (RGB, separate BFI maps) |
+| `renderBFI_RGBW_Packed(...)` | Instance render using configured phase mode + internal tick (RGBW, packed BFI map) |
+| `renderBFI_RGB_Packed(...)` | Instance render using configured phase mode + internal tick (RGB, packed BFI map) |
 | `dumpLUTHeader(Serial)` | Emit embeddable PROGMEM header of current LUTs |
 
 ### Key Types
