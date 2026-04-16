@@ -2,6 +2,8 @@
 
 Temporal rendering framework for addressable LED strips, providing sub-8-bit brightness resolution through Blended Frame Insertion (BFI). By rapidly alternating between two brightness levels across a multi-phase display cycle, the library achieves 16-bit equivalent perceived output using only 8-bit LED drivers. In the industry this is typically known as Temporal Dithering or FRC (Frame Rate Control). The main distinction (and why I chose to call it Blended Frame Insertion) is that we introduce a larger cycle length allowing for finer control.
 
+> **[Skip to How It Works](#how-it-works)** if you want to jump straight to the technical overview.
+
 ## Project Background
 
 Around 6 years ago I had built up a sparse peripheral display from 5x5mm WS2812 LEDs, which quickly evolved into ordering APA102-2020s and creating a custom circuit with 576 LEDs per eye. ([V1](https://www.reddit.com/r/ValveIndex/comments/cqbnmp/a_comprehensive_guide_on_how_to_augment_a_wider/) — V2 found here: [V2](https://www.reddit.com/r/ValveIndex/comments/cw635m/peripheral_fov_led_mod_v2_improved_led_placement/) — the eventual v3 custom flex circuit had issues from being designed as a matrix that was too dense and didn't account for radius bends, pictures may be available in imgur)
@@ -126,6 +128,10 @@ void loop() {
 | `commitPixelRGB_Packed(...)` | Write encoded RGB state to frame buffers + packed BFI map (static) |
 | `renderSubpixelBFI_RGBW_Packed(...)` | Render one BFI phase for RGBW pixels from packed BFI map (static) |
 | `renderSubpixelBFI_RGB_Packed(...)` | Render one BFI phase for RGB pixels from packed BFI map (static) |
+| `setCubeLUT3D(const CubeLUT3D*)` | Attach a loaded 3D cube for runtime color correction |
+| `setCubeLUT3DEnabled(bool)` | Enable/disable the 3D cube LUT stage in the pipeline |
+| `cubeLUT3DEnabled()` | Query whether the cube LUT stage is active |
+| `applyCubeLUT3D(rQ16, gQ16, bQ16)` | Trilinear lookup through the attached cube, returns `RgbwTargets` |
 | `dumpLUTHeader(Serial)` | Emit embeddable PROGMEM header of current LUTs |
 
 ### Key Types
@@ -154,6 +160,24 @@ struct PolicyConfig {
     // ... and more — see TemporalBFI.h
 };
 ```
+
+### CubeLUT3D
+
+Platform-agnostic 3D color-correction cube loader and trilinear interpolation engine. Cubes can be loaded from SD card binary files, PROGMEM header arrays, or external QSPI flash.
+
+| Method / Field | Description |
+|----------------|-------------|
+| `attach(data, gridSize, channels)` | Attach a non-owning pointer to an existing cube buffer |
+| `loadFromFileBuffer(buf, len)` | Parse a 4-byte header + payload from a raw file buffer |
+| `lookup(rQ16, gQ16, bQ16, out[])` | Trilinear interpolation — writes 3 (RGB) or 4 (RGBW) uint16 results |
+| `isValid()` | Returns `true` if data is attached and grid/channels are set |
+| `isRGBW()` | Returns `true` if `channels == 4` |
+| `dataBytes(grid, ch)` | (static) Payload size in bytes for a given grid and channel count |
+| `fileBytes(grid, ch)` | (static) Total file size (4-byte header + payload) |
+| `maxGridForBytes(bytes, ch)` | (static) Largest grid that fits within a byte budget |
+| `parseHeader(hdr, grid, ch)` | (static) Read grid size and channel count from a 4-byte LE header |
+
+Binary cube format: `[uint16 gridSize LE][uint16 channels LE][N³ × C × uint16 payload LE]`
 
 ## Examples
 
