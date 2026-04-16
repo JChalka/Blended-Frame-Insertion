@@ -48,10 +48,13 @@ void setup() {
 
     Serial.println("FrameworkDemo — minimal TemporalBFI pipeline");
     Serial.print("R: val="); Serial.print(stR.value);
+    Serial.print(" floor="); Serial.print(stR.lowerValue);
     Serial.print(" bfi=");  Serial.println(stR.bfi);
     Serial.print("G: val="); Serial.print(stG.value);
+    Serial.print(" floor="); Serial.print(stG.lowerValue);
     Serial.print(" bfi=");  Serial.println(stG.bfi);
     Serial.print("B: val="); Serial.print(stB.value);
+    Serial.print(" floor="); Serial.print(stB.lowerValue);
     Serial.print(" bfi=");  Serial.println(stB.bfi);
 }
 

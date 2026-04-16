@@ -316,12 +316,16 @@ static void processTestPixel(uint16_t rQ16, uint16_t gQ16, uint16_t bQ16) {
     }
 
     Serial.print("Solver: G(v="); Serial.print(stG.value);
+    Serial.print(",f="); Serial.print(stG.lowerValue);
     Serial.print(",bfi="); Serial.print(stG.bfi);
     Serial.print(") R(v="); Serial.print(stR.value);
+    Serial.print(",f="); Serial.print(stR.lowerValue);
     Serial.print(",bfi="); Serial.print(stR.bfi);
     Serial.print(") B(v="); Serial.print(stB.value);
+    Serial.print(",f="); Serial.print(stB.lowerValue);
     Serial.print(",bfi="); Serial.print(stB.bfi);
     Serial.print(") W(v="); Serial.print(stW.value);
+    Serial.print(",f="); Serial.print(stW.lowerValue);
     Serial.print(",bfi="); Serial.print(stW.bfi);
     Serial.println(")");
 }
