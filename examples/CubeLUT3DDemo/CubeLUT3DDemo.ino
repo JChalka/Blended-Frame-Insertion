@@ -332,6 +332,7 @@ static void processTestPixel(uint16_t rQ16, uint16_t gQ16, uint16_t bQ16) {
 
 void setup() {
     Serial.begin(115200);
+    delay(250);
     while (!Serial && millis() < 3000) {}
 
     Serial.println("=== CubeLUT3DDemo ===");
