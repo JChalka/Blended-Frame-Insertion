@@ -167,6 +167,7 @@ struct PolicyConfig {
 | [True16RGBWGradientDemo](examples/True16RGBWGradientDemo/) | Animated 16-bit gradient sweep with per-pixel RGBW extraction and BFI. | Library only |
 | [TemporalFastLEDDemo](examples/TemporalFastLEDDemo/) | FastLED CRGB integration with GRB byte-order mapping and 5-phase BFI. | FastLED |
 | [PackedBFIMapDemo](examples/PackedBFIMapDemo/) | Demonstrates packed BFI maps — nybble-pair encoding halves per-pixel BFI storage from 4 bytes to 2. | Library only |
+| [CubeLUT3DDemo](examples/CubeLUT3DDemo/) | Demonstrates loading & using rgbw_lut_builder Cube LUTS at runtime. Includes SD binary & header array loading. | Library + SD.h |
 | [HyperTeensy_Temporal_Blend](examples/HyperTeensy_Temporal_Blend/) | Full production sketch — ObjectFLED parallel output, RawHID+Serial USB, independent solver/calibration headers. | ObjectFLED |
 | [Teensy_Temporal_Calibration](examples/Teensy_Temporal_Calibration/) | Calibration capture sketch — drives LED states for host-side colorimetric measurement via serial protocol. | ObjectFLED |
 
