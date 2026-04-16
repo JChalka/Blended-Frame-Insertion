@@ -1,6 +1,6 @@
 # TemporalBFI Build Report
 
-**10/10** environments built successfully.
+**11/11** environments built successfully.
 
 | Environment | Status | Flash | Flash Free | RAM1 | RAM1 Free | RAM2 | RAM2 Free |
 |-------------|--------|-------|------------|------|-----------|------|-----------|
@@ -14,5 +14,9 @@
 | True16RGBWGradientDemo | SUCCESS | 106.0 KB | 1878.0 KB | 65.4 KB | 427.0 KB | 12.1 KB | 499.9 KB |
 | TemporalFastLEDDemo | SUCCESS | 127.0 KB | 1857.0 KB | 86.8 KB | 424.6 KB | 17.2 KB | 494.8 KB |
 | PackedBFIMapDemo | SUCCESS | 133.0 KB | 1851.0 KB | 92.5 KB | 392.8 KB | 12.1 KB | 499.9 KB |
+| CubeLUT3DDemo | SUCCESS | 160.0 KB | 7776.0 KB | 120.1 KB | 389.9 KB | 12.1 KB | 499.9 KB |
 
-Target: **Teensy 4.0** (IMXRT1062) — 1984 KB Flash, 512 KB RAM1, 512 KB RAM2
+Target: **Teensy 4.0 (IMXRT1062) — 1984 KB Flash, 512 KB RAM1, 512 KB RAM2**<br>Environments: HyperTeensy, Calibration, FrameworkDemo, RGB16InputDemo, ColorCalibrationABDemo, PrecomputeDemo, rgbwNoExtractionDemo, True16RGBWGradientDemo, TemporalFastLEDDemo, PackedBFIMapDemo
+
+Target: **Teensy 4.1 (IMXRT1062) — 7936 KB Flash, 512 KB RAM1, 512 KB RAM2, PSRAM + QSPI pads**<br>Environments: CubeLUT3DDemo
+

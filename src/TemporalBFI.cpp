@@ -1,4 +1,5 @@
 #include "TemporalBFI.h"
+#include "CubeLUT3D.h"
 
 namespace TemporalBFI {
 
@@ -136,6 +137,29 @@ uint16_t SolverRuntime::applyCalibration(uint16_t q16, uint8_t channel) const
 {
     if (!m_calibrationEnabled || !m_calibrationFn) return q16;
     return m_calibrationFn(q16, channel);
+}
+
+// ============================================================================
+// 3D Cube LUT
+// ============================================================================
+
+void SolverRuntime::setCubeLUT3D(const CubeLUT3D* cube)
+{
+    m_cubeLUT = cube;
+}
+
+void SolverRuntime::setCubeLUT3DEnabled(bool enabled)
+{
+    m_cubeLUTEnabled = enabled;
+}
+
+RgbwTargets SolverRuntime::applyCubeLUT3D(uint16_t rQ16, uint16_t gQ16, uint16_t bQ16) const
+{
+    if (!m_cubeLUTEnabled || !m_cubeLUT || !m_cubeLUT->isValid()) {
+        // Passthrough — no cube loaded or disabled.
+        return {rQ16, gQ16, bQ16, 0};
+    }
+    return m_cubeLUT->lookup(rQ16, gQ16, bQ16);
 }
 
 // ============================================================================

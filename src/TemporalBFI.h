@@ -246,6 +246,9 @@ inline void writePackedBfiChannel(uint8_t* packed,
 
 static constexpr uint16_t maxU16(uint16_t a, uint16_t b) { return (a > b) ? a : b; }
 
+// Forward declaration for 3D cube LUT support (defined in CubeLUT3D.h).
+struct CubeLUT3D;
+
 // ============================================================================
 // SolverRuntime — the primary library interface
 // ============================================================================
@@ -311,6 +314,23 @@ public:
 
     RgbwTargets applyWhiteLimit(uint16_t rQ16, uint16_t gQ16,
                                 uint16_t bQ16, uint16_t wQ16) const;
+
+    // ----- 3D Cube LUT -----
+    // Applies a pre-calibrated RGB→RGBW (or RGB→RGB) 3D lookup table.
+    // In the pipeline this replaces calibration + white extraction:
+    //   Input → Transfer Curve → **Cube LUT** → Solver
+    // Values returned by the cube are calibrated targets — do not modify
+    // them before passing to the solver.
+
+    void setCubeLUT3D(const CubeLUT3D* cube);
+    void setCubeLUT3DEnabled(bool enabled);
+    bool cubeLUT3DEnabled() const { return m_cubeLUTEnabled; }
+
+    /// Look up (rQ16, gQ16, bQ16) through the attached 3D cube.
+    /// Returns RGBW targets when a valid RGBW cube is loaded, or RGB
+    /// targets (wQ16 = 0) for an RGB cube.  If the cube is disabled or
+    /// missing, returns a passthrough (rQ16, gQ16, bQ16, 0).
+    RgbwTargets applyCubeLUT3D(uint16_t rQ16, uint16_t gQ16, uint16_t bQ16) const;
 
     // ----- Pixel Commit -----
 
@@ -404,6 +424,10 @@ private:
 
     // White limit
     uint8_t m_whiteLimit = 255;
+
+    // 3D Cube LUT (non-owning pointer — caller owns the CubeLUT3D)
+    const CubeLUT3D* m_cubeLUT = nullptr;
+    bool m_cubeLUTEnabled = false;
 
     // Solver config (owned directly — no external type dependency)
     PolicyConfig m_cfg;

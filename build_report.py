@@ -50,8 +50,18 @@ def _report_path():
 ENV_ORDER = [
     "HyperTeensy", "Calibration", "FrameworkDemo", "RGB16InputDemo",
     "ColorCalibrationABDemo", "PrecomputeDemo", "rgbwNoExtractionDemo",
-    "True16RGBWGradientDemo", "TemporalFastLEDDemo",
+    "True16RGBWGradientDemo", "TemporalFastLEDDemo", "PackedBFIMapDemo",
+    "CubeLUT3DDemo",
 ]
+
+# Board metadata for summary line.
+# Keys are PlatformIO board IDs; values are human-readable descriptions.
+BOARD_INFO = {
+    "teensy40": "Teensy 4.0 (IMXRT1062) \u2014 1984 KB Flash, 512 KB RAM1, 512 KB RAM2",
+    "teensy41": "Teensy 4.1 (IMXRT1062) \u2014 7936 KB Flash, 512 KB RAM1, 512 KB RAM2, PSRAM + QSPI pads",
+    "esp32-s3-devkitc-1": "ESP32-S3 DevKitC-1 \u2014 8 MB Flash, 512 KB SRAM, PSRAM",
+    "esp32-p4-function-ev-board": "ESP32-P4 Function EV Board \u2014 16 MB Flash, 768 KB SRAM, PSRAM",
+}
 
 
 # ── teensy_size helpers ─────────────────────────────────────────────────────
@@ -172,7 +182,22 @@ def generate_report(results: dict, show_badge: bool = False) -> str:
         )
 
     lines.append("")
-    lines.append("Target: **Teensy 4.0** (IMXRT1062) — 1984 KB Flash, 512 KB RAM1, 512 KB RAM2")
+
+    # Build a dynamic target summary from boards seen in build results.
+    boards_seen = {}
+    for name in ordered:
+        r = results[name]
+        bid = r.get("board", "")
+        if bid:
+            boards_seen.setdefault(bid, []).append(name)
+    if boards_seen:
+        for bid, envs in boards_seen.items():
+            desc = BOARD_INFO.get(bid, bid)
+            lines.append(f"Target: **{desc}**<br>Environments: {', '.join(envs)}")
+            lines.append("")
+    else:
+        lines.append("Target: _(board info unavailable \u2014 rebuild to populate)_")
+
     lines.append("")
     return "\n".join(lines)
 
@@ -197,6 +222,7 @@ def _pio_post_build(target, source, env):
 
     sizes = _run_teensy_size(teensy_size_exe, elf_path)
     sizes["status"] = "SUCCESS"
+    sizes["board"] = env.BoardConfig().id
 
     results = _load_results()
     results[env_name] = sizes
