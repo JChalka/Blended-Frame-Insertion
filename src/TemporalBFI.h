@@ -461,6 +461,25 @@ public:
         uint8_t* displayBuffer, uint16_t pixelCount,
         uint8_t phase);
 
+    // ----- Indexed BFI Rendering (single pixel, static / FixedMask) -----
+    // These write to a caller-provided output array at the given pixel
+    // index rather than sweeping the entire buffer.  Useful for
+    // per-pixel updates (e.g. key-press handlers, scatter-gather).
+
+    static void renderPixelBFI_RGBW(
+        const uint8_t* upperFrame, const uint8_t* floorFrame,
+        const uint8_t* bfiMapG, const uint8_t* bfiMapR,
+        const uint8_t* bfiMapB, const uint8_t* bfiMapW,
+        uint8_t* displayBuffer, uint16_t pixelIndex,
+        uint8_t phase);
+
+    static void renderPixelBFI_RGB(
+        const uint8_t* upperFrame, const uint8_t* floorFrame,
+        const uint8_t* bfiMapG, const uint8_t* bfiMapR,
+        const uint8_t* bfiMapB,
+        uint8_t* displayBuffer, uint16_t pixelIndex,
+        uint8_t phase);
+
     // ----- Packed BFI Pixel Commit -----
     // These variants write BFI levels into a packed nybble-pair buffer
     // (2 bytes/pixel) instead of separate per-channel arrays.
@@ -493,6 +512,20 @@ public:
         uint8_t* displayBuffer, uint16_t pixelCount,
         uint8_t phase);
 
+    // ----- Indexed Packed BFI Rendering (single pixel, static / FixedMask) -----
+
+    static void renderPixelBFI_RGBW_Packed(
+        const uint8_t* upperFrame, const uint8_t* floorFrame,
+        const uint8_t* packedBfiMap,
+        uint8_t* displayBuffer, uint16_t pixelIndex,
+        uint8_t phase);
+
+    static void renderPixelBFI_RGB_Packed(
+        const uint8_t* upperFrame, const uint8_t* floorFrame,
+        const uint8_t* packedBfiMap,
+        uint8_t* displayBuffer, uint16_t pixelIndex,
+        uint8_t phase);
+
     // ----- Instance Render (uses internal tick/mode) -----
     // Non-static render methods that use the configured PhaseMode,
     // cycle length, and internal tick counter.  Call advanceTick()
@@ -519,6 +552,30 @@ public:
         const uint8_t* upperFrame, const uint8_t* floorFrame,
         const uint8_t* packedBfiMap,
         uint8_t* displayBuffer, uint16_t pixelCount) const;
+
+    // ----- Indexed Instance Render (single pixel, uses internal tick/mode) -----
+
+    void renderPixel_RGBW(
+        const uint8_t* upperFrame, const uint8_t* floorFrame,
+        const uint8_t* bfiMapG, const uint8_t* bfiMapR,
+        const uint8_t* bfiMapB, const uint8_t* bfiMapW,
+        uint8_t* displayBuffer, uint16_t pixelIndex) const;
+
+    void renderPixel_RGB(
+        const uint8_t* upperFrame, const uint8_t* floorFrame,
+        const uint8_t* bfiMapG, const uint8_t* bfiMapR,
+        const uint8_t* bfiMapB,
+        uint8_t* displayBuffer, uint16_t pixelIndex) const;
+
+    void renderPixel_RGBW_Packed(
+        const uint8_t* upperFrame, const uint8_t* floorFrame,
+        const uint8_t* packedBfiMap,
+        uint8_t* displayBuffer, uint16_t pixelIndex) const;
+
+    void renderPixel_RGB_Packed(
+        const uint8_t* upperFrame, const uint8_t* floorFrame,
+        const uint8_t* packedBfiMap,
+        uint8_t* displayBuffer, uint16_t pixelIndex) const;
 
     // ----- LUT Header Dump -----
 

@@ -176,6 +176,10 @@
 | method | `void renderBFI_RGBW(const uint8_t* upperFrame, const uint8_t* floorFrame, const uint8_t* bfiMapG, const uint8_t* bfiMapR, const uint8_t* bfiMapB, const uint8_t* bfiMapW, uint8_t* displayBuffer, uint16_t pixelCount) const` |  |
 | method | `void renderBFI_RGBW_Packed(const uint8_t* upperFrame, const uint8_t* floorFrame, const uint8_t* packedBfiMap, uint8_t* displayBuffer, uint16_t pixelCount) const` |  |
 | method | `void renderBFI_RGB_Packed(const uint8_t* upperFrame, const uint8_t* floorFrame, const uint8_t* packedBfiMap, uint8_t* displayBuffer, uint16_t pixelCount) const` |  |
+| method | `void renderPixel_RGB(const uint8_t* upperFrame, const uint8_t* floorFrame, const uint8_t* bfiMapG, const uint8_t* bfiMapR, const uint8_t* bfiMapB, uint8_t* displayBuffer, uint16_t pixelIndex) const` |  |
+| method | `void renderPixel_RGBW(const uint8_t* upperFrame, const uint8_t* floorFrame, const uint8_t* bfiMapG, const uint8_t* bfiMapR, const uint8_t* bfiMapB, const uint8_t* bfiMapW, uint8_t* displayBuffer, uint16_t pixelIndex) const` |  |
+| method | `void renderPixel_RGBW_Packed(const uint8_t* upperFrame, const uint8_t* floorFrame, const uint8_t* packedBfiMap, uint8_t* displayBuffer, uint16_t pixelIndex) const` |  |
+| method | `void renderPixel_RGB_Packed(const uint8_t* upperFrame, const uint8_t* floorFrame, const uint8_t* packedBfiMap, uint8_t* displayBuffer, uint16_t pixelIndex) const` |  |
 | method | `void resetTick()` |  |
 | method | `void setCalibrationEnabled(bool enabled)` |  |
 | method | `void setCalibrationFunction(CalibrationFn fn)` |  |
@@ -194,6 +198,10 @@
 | static method | `static void commitPixelRGBW(uint8_t* upperFrame, uint8_t* floorFrame, uint8_t* bfiMapG, uint8_t* bfiMapR, uint8_t* bfiMapB, uint8_t* bfiMapW, uint16_t pixelIndex, const EncodedState& g, const EncodedState& r, const EncodedState& b, const EncodedState& w)` |  |
 | static method | `static void commitPixelRGBW_Packed(uint8_t* upperFrame, uint8_t* floorFrame, uint8_t* packedBfiMap, uint16_t pixelIndex, const EncodedState& g, const EncodedState& r, const EncodedState& b, const EncodedState& w)` |  |
 | static method | `static void commitPixelRGB_Packed(uint8_t* upperFrame, uint8_t* floorFrame, uint8_t* packedBfiMap, uint16_t pixelIndex, const EncodedState& g, const EncodedState& r, const EncodedState& b)` |  |
+| static method | `static void renderPixelBFI_RGB(const uint8_t* upperFrame, const uint8_t* floorFrame, const uint8_t* bfiMapG, const uint8_t* bfiMapR, const uint8_t* bfiMapB, uint8_t* displayBuffer, uint16_t pixelIndex, uint8_t phase)` |  |
+| static method | `static void renderPixelBFI_RGBW(const uint8_t* upperFrame, const uint8_t* floorFrame, const uint8_t* bfiMapG, const uint8_t* bfiMapR, const uint8_t* bfiMapB, const uint8_t* bfiMapW, uint8_t* displayBuffer, uint16_t pixelIndex, uint8_t phase)` |  |
+| static method | `static void renderPixelBFI_RGBW_Packed(const uint8_t* upperFrame, const uint8_t* floorFrame, const uint8_t* packedBfiMap, uint8_t* displayBuffer, uint16_t pixelIndex, uint8_t phase)` |  |
+| static method | `static void renderPixelBFI_RGB_Packed(const uint8_t* upperFrame, const uint8_t* floorFrame, const uint8_t* packedBfiMap, uint8_t* displayBuffer, uint16_t pixelIndex, uint8_t phase)` |  |
 | static method | `static void renderSubpixelBFI_RGB(const uint8_t* upperFrame, const uint8_t* floorFrame, const uint8_t* bfiMapG, const uint8_t* bfiMapR, const uint8_t* bfiMapB, uint8_t* displayBuffer, uint16_t pixelCount, uint8_t phase)` |  |
 | static method | `static void renderSubpixelBFI_RGBW(const uint8_t* upperFrame, const uint8_t* floorFrame, const uint8_t* bfiMapG, const uint8_t* bfiMapR, const uint8_t* bfiMapB, const uint8_t* bfiMapW, uint8_t* displayBuffer, uint16_t pixelCount, uint8_t phase)` |  |
 | static method | `static void renderSubpixelBFI_RGBW_Packed(const uint8_t* upperFrame, const uint8_t* floorFrame, const uint8_t* packedBfiMap, uint8_t* displayBuffer, uint16_t pixelCount, uint8_t phase)` |  |

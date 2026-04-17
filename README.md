@@ -163,12 +163,16 @@ void loop() {
 | `setWhiteLimit(limit)` | Set 0–255 white channel maximum |
 | `commitPixelRGBW(...)` | Write encoded RGBW state to frame/BFI buffers (static) |
 | `commitPixelRGB(...)` | Write encoded RGB state to frame/BFI buffers (static) |
-| `renderSubpixelBFI_RGBW(...)` | Render one BFI phase for RGBW pixels (static) |
-| `renderSubpixelBFI_RGB(...)` | Render one BFI phase for RGB pixels (static) |
+| `renderSubpixelBFI_RGBW(...)` | Render one BFI phase for RGBW pixels (static, full buffer) |
+| `renderSubpixelBFI_RGB(...)` | Render one BFI phase for RGB pixels (static, full buffer) |
+| `renderPixelBFI_RGBW(...)` | Render one BFI phase for a single RGBW pixel by index (static) |
+| `renderPixelBFI_RGB(...)` | Render one BFI phase for a single RGB pixel by index (static) |
 | `commitPixelRGBW_Packed(...)` | Write encoded RGBW state to frame buffers + packed BFI map (static) |
 | `commitPixelRGB_Packed(...)` | Write encoded RGB state to frame buffers + packed BFI map (static) |
-| `renderSubpixelBFI_RGBW_Packed(...)` | Render one BFI phase for RGBW pixels from packed BFI map (static) |
-| `renderSubpixelBFI_RGB_Packed(...)` | Render one BFI phase for RGB pixels from packed BFI map (static) |
+| `renderSubpixelBFI_RGBW_Packed(...)` | Render one BFI phase for RGBW pixels from packed BFI map (static, full buffer) |
+| `renderSubpixelBFI_RGB_Packed(...)` | Render one BFI phase for RGB pixels from packed BFI map (static, full buffer) |
+| `renderPixelBFI_RGBW_Packed(...)` | Render one BFI phase for a single RGBW pixel by index from packed BFI map (static) |
+| `renderPixelBFI_RGB_Packed(...)` | Render one BFI phase for a single RGB pixel by index from packed BFI map (static) |
 | `setCubeLUT3D(const CubeLUT3D*)` | Attach a loaded 3D cube for runtime color correction |
 | `setCubeLUT3DEnabled(bool)` | Enable/disable the 3D cube LUT stage in the pipeline |
 | `cubeLUT3DEnabled()` | Query whether the cube LUT stage is active |
@@ -178,10 +182,14 @@ void loop() {
 | `advanceTick()` | Step the internal tick counter; returns `true` on cycle boundary |
 | `resetTick()` | Reset the internal tick counter to 0 |
 | `channelActiveOnCurrentTick(bfi)` | Query whether a BFI level shows upper on the current tick |
-| `renderBFI_RGBW(...)` | Instance render using configured phase mode + internal tick (RGBW, separate BFI maps) |
-| `renderBFI_RGB(...)` | Instance render using configured phase mode + internal tick (RGB, separate BFI maps) |
-| `renderBFI_RGBW_Packed(...)` | Instance render using configured phase mode + internal tick (RGBW, packed BFI map) |
-| `renderBFI_RGB_Packed(...)` | Instance render using configured phase mode + internal tick (RGB, packed BFI map) |
+| `renderBFI_RGBW(...)` | Instance render using configured phase mode + internal tick (RGBW, separate BFI maps, full buffer) |
+| `renderBFI_RGB(...)` | Instance render using configured phase mode + internal tick (RGB, separate BFI maps, full buffer) |
+| `renderBFI_RGBW_Packed(...)` | Instance render using configured phase mode + internal tick (RGBW, packed BFI map, full buffer) |
+| `renderBFI_RGB_Packed(...)` | Instance render using configured phase mode + internal tick (RGB, packed BFI map, full buffer) |
+| `renderPixel_RGBW(...)` | Instance render of a single RGBW pixel by index (separate BFI maps) |
+| `renderPixel_RGB(...)` | Instance render of a single RGB pixel by index (separate BFI maps) |
+| `renderPixel_RGBW_Packed(...)` | Instance render of a single RGBW pixel by index (packed BFI map) |
+| `renderPixel_RGB_Packed(...)` | Instance render of a single RGB pixel by index (packed BFI map) |
 | `dumpLUTHeader(Serial)` | Emit embeddable PROGMEM header of current LUTs |
 
 ### Key Types

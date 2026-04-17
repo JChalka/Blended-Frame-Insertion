@@ -323,6 +323,49 @@ void SolverRuntime::renderSubpixelBFI_RGB(
 }
 
 // ============================================================================
+// Indexed BFI Rendering (single pixel, static / FixedMask)
+// ============================================================================
+
+void SolverRuntime::renderPixelBFI_RGBW(
+    const uint8_t* upperFrame, const uint8_t* floorFrame,
+    const uint8_t* bfiMapG, const uint8_t* bfiMapR,
+    const uint8_t* bfiMapB, const uint8_t* bfiMapW,
+    uint8_t* displayBuffer, uint16_t pixelIndex,
+    uint8_t phase)
+{
+    const uint8_t phaseBit = (uint8_t)(1u << (phase & 0x07u));
+    const uint32_t off = (uint32_t)pixelIndex * 4u;
+
+    const uint8_t* src = upperFrame + off;
+    const uint8_t* flr = floorFrame ? floorFrame + off : nullptr;
+    uint8_t* dst = displayBuffer + off;
+
+    dst[0] = (PHASE_EMIT_MASK[clampBfi(bfiMapG[pixelIndex])] & phaseBit) ? src[0] : (flr ? flr[0] : 0);
+    dst[1] = (PHASE_EMIT_MASK[clampBfi(bfiMapR[pixelIndex])] & phaseBit) ? src[1] : (flr ? flr[1] : 0);
+    dst[2] = (PHASE_EMIT_MASK[clampBfi(bfiMapB[pixelIndex])] & phaseBit) ? src[2] : (flr ? flr[2] : 0);
+    dst[3] = (PHASE_EMIT_MASK[clampBfi(bfiMapW[pixelIndex])] & phaseBit) ? src[3] : (flr ? flr[3] : 0);
+}
+
+void SolverRuntime::renderPixelBFI_RGB(
+    const uint8_t* upperFrame, const uint8_t* floorFrame,
+    const uint8_t* bfiMapG, const uint8_t* bfiMapR,
+    const uint8_t* bfiMapB,
+    uint8_t* displayBuffer, uint16_t pixelIndex,
+    uint8_t phase)
+{
+    const uint8_t phaseBit = (uint8_t)(1u << (phase & 0x07u));
+    const uint32_t off = (uint32_t)pixelIndex * 3u;
+
+    const uint8_t* src = upperFrame + off;
+    const uint8_t* flr = floorFrame ? floorFrame + off : nullptr;
+    uint8_t* dst = displayBuffer + off;
+
+    dst[0] = (PHASE_EMIT_MASK[clampBfi(bfiMapG[pixelIndex])] & phaseBit) ? src[0] : (flr ? flr[0] : 0);
+    dst[1] = (PHASE_EMIT_MASK[clampBfi(bfiMapR[pixelIndex])] & phaseBit) ? src[1] : (flr ? flr[1] : 0);
+    dst[2] = (PHASE_EMIT_MASK[clampBfi(bfiMapB[pixelIndex])] & phaseBit) ? src[2] : (flr ? flr[2] : 0);
+}
+
+// ============================================================================
 // Packed BFI Commit
 // ============================================================================
 
@@ -433,6 +476,53 @@ void SolverRuntime::renderSubpixelBFI_RGB_Packed(
         dst += 3;
         pk += PACKED_BFI_BYTES_PER_PIXEL;
     }
+}
+
+// ============================================================================
+// Indexed Packed BFI Rendering (single pixel, static / FixedMask)
+// ============================================================================
+
+void SolverRuntime::renderPixelBFI_RGBW_Packed(
+    const uint8_t* upperFrame, const uint8_t* floorFrame,
+    const uint8_t* packedBfiMap,
+    uint8_t* displayBuffer, uint16_t pixelIndex,
+    uint8_t phase)
+{
+    const uint8_t phaseBit = (uint8_t)(1u << (phase & 0x07u));
+    const uint32_t off4 = (uint32_t)pixelIndex * 4u;
+    const uint32_t pkOff = (uint32_t)pixelIndex * PACKED_BFI_BYTES_PER_PIXEL;
+
+    const uint8_t* src = upperFrame + off4;
+    const uint8_t* flr = floorFrame ? floorFrame + off4 : nullptr;
+    uint8_t* dst = displayBuffer + off4;
+    const uint8_t gr = packedBfiMap[pkOff];
+    const uint8_t bw = packedBfiMap[pkOff + 1];
+
+    dst[0] = (PHASE_EMIT_MASK[clampBfi(gr >> 4)]    & phaseBit) ? src[0] : (flr ? flr[0] : 0);
+    dst[1] = (PHASE_EMIT_MASK[clampBfi(gr & 0x0Fu)] & phaseBit) ? src[1] : (flr ? flr[1] : 0);
+    dst[2] = (PHASE_EMIT_MASK[clampBfi(bw >> 4)]    & phaseBit) ? src[2] : (flr ? flr[2] : 0);
+    dst[3] = (PHASE_EMIT_MASK[clampBfi(bw & 0x0Fu)] & phaseBit) ? src[3] : (flr ? flr[3] : 0);
+}
+
+void SolverRuntime::renderPixelBFI_RGB_Packed(
+    const uint8_t* upperFrame, const uint8_t* floorFrame,
+    const uint8_t* packedBfiMap,
+    uint8_t* displayBuffer, uint16_t pixelIndex,
+    uint8_t phase)
+{
+    const uint8_t phaseBit = (uint8_t)(1u << (phase & 0x07u));
+    const uint32_t off3 = (uint32_t)pixelIndex * 3u;
+    const uint32_t pkOff = (uint32_t)pixelIndex * PACKED_BFI_BYTES_PER_PIXEL;
+
+    const uint8_t* src = upperFrame + off3;
+    const uint8_t* flr = floorFrame ? floorFrame + off3 : nullptr;
+    uint8_t* dst = displayBuffer + off3;
+    const uint8_t gr = packedBfiMap[pkOff];
+    const uint8_t bw = packedBfiMap[pkOff + 1];
+
+    dst[0] = (PHASE_EMIT_MASK[clampBfi(gr >> 4)]    & phaseBit) ? src[0] : (flr ? flr[0] : 0);
+    dst[1] = (PHASE_EMIT_MASK[clampBfi(gr & 0x0Fu)] & phaseBit) ? src[1] : (flr ? flr[1] : 0);
+    dst[2] = (PHASE_EMIT_MASK[clampBfi(bw >> 4)]    & phaseBit) ? src[2] : (flr ? flr[2] : 0);
 }
 
 // ============================================================================
@@ -624,6 +714,94 @@ void SolverRuntime::renderBFI_RGB_Packed(
         dst += 3;
         pk += PACKED_BFI_BYTES_PER_PIXEL;
     }
+}
+
+// ============================================================================
+// Indexed Instance Render (single pixel, uses internal tick/mode)
+// ============================================================================
+
+void SolverRuntime::renderPixel_RGBW(
+    const uint8_t* upperFrame, const uint8_t* floorFrame,
+    const uint8_t* bfiMapG, const uint8_t* bfiMapR,
+    const uint8_t* bfiMapB, const uint8_t* bfiMapW,
+    uint8_t* displayBuffer, uint16_t pixelIndex) const
+{
+    bool isUp[MAX_SUPPORTED_CYCLE_LENGTH];
+    fillPhaseTable(isUp, m_phaseMode, m_tick, m_cycleLength);
+
+    const uint32_t off = (uint32_t)pixelIndex * 4u;
+    const uint8_t* src = upperFrame + off;
+    const uint8_t* flr = floorFrame ? floorFrame + off : nullptr;
+    uint8_t* dst = displayBuffer + off;
+
+    dst[0] = isUp[clampBfiToTable(bfiMapG[pixelIndex])] ? src[0] : (flr ? flr[0] : 0);
+    dst[1] = isUp[clampBfiToTable(bfiMapR[pixelIndex])] ? src[1] : (flr ? flr[1] : 0);
+    dst[2] = isUp[clampBfiToTable(bfiMapB[pixelIndex])] ? src[2] : (flr ? flr[2] : 0);
+    dst[3] = isUp[clampBfiToTable(bfiMapW[pixelIndex])] ? src[3] : (flr ? flr[3] : 0);
+}
+
+void SolverRuntime::renderPixel_RGB(
+    const uint8_t* upperFrame, const uint8_t* floorFrame,
+    const uint8_t* bfiMapG, const uint8_t* bfiMapR,
+    const uint8_t* bfiMapB,
+    uint8_t* displayBuffer, uint16_t pixelIndex) const
+{
+    bool isUp[MAX_SUPPORTED_CYCLE_LENGTH];
+    fillPhaseTable(isUp, m_phaseMode, m_tick, m_cycleLength);
+
+    const uint32_t off = (uint32_t)pixelIndex * 3u;
+    const uint8_t* src = upperFrame + off;
+    const uint8_t* flr = floorFrame ? floorFrame + off : nullptr;
+    uint8_t* dst = displayBuffer + off;
+
+    dst[0] = isUp[clampBfiToTable(bfiMapG[pixelIndex])] ? src[0] : (flr ? flr[0] : 0);
+    dst[1] = isUp[clampBfiToTable(bfiMapR[pixelIndex])] ? src[1] : (flr ? flr[1] : 0);
+    dst[2] = isUp[clampBfiToTable(bfiMapB[pixelIndex])] ? src[2] : (flr ? flr[2] : 0);
+}
+
+void SolverRuntime::renderPixel_RGBW_Packed(
+    const uint8_t* upperFrame, const uint8_t* floorFrame,
+    const uint8_t* packedBfiMap,
+    uint8_t* displayBuffer, uint16_t pixelIndex) const
+{
+    bool isUp[MAX_SUPPORTED_CYCLE_LENGTH];
+    fillPhaseTable(isUp, m_phaseMode, m_tick, m_cycleLength);
+
+    const uint32_t off4 = (uint32_t)pixelIndex * 4u;
+    const uint32_t pkOff = (uint32_t)pixelIndex * PACKED_BFI_BYTES_PER_PIXEL;
+
+    const uint8_t* src = upperFrame + off4;
+    const uint8_t* flr = floorFrame ? floorFrame + off4 : nullptr;
+    uint8_t* dst = displayBuffer + off4;
+    const uint8_t gr = packedBfiMap[pkOff];
+    const uint8_t bw = packedBfiMap[pkOff + 1];
+
+    dst[0] = isUp[clampBfiToTable(gr >> 4)]    ? src[0] : (flr ? flr[0] : 0);
+    dst[1] = isUp[clampBfiToTable(gr & 0x0Fu)] ? src[1] : (flr ? flr[1] : 0);
+    dst[2] = isUp[clampBfiToTable(bw >> 4)]    ? src[2] : (flr ? flr[2] : 0);
+    dst[3] = isUp[clampBfiToTable(bw & 0x0Fu)] ? src[3] : (flr ? flr[3] : 0);
+}
+
+void SolverRuntime::renderPixel_RGB_Packed(
+    const uint8_t* upperFrame, const uint8_t* floorFrame,
+    const uint8_t* packedBfiMap,
+    uint8_t* displayBuffer, uint16_t pixelIndex) const
+{
+    bool isUp[MAX_SUPPORTED_CYCLE_LENGTH];
+    fillPhaseTable(isUp, m_phaseMode, m_tick, m_cycleLength);
+
+    const uint32_t off3 = (uint32_t)pixelIndex * 3u;
+    const uint32_t pkOff = (uint32_t)pixelIndex * PACKED_BFI_BYTES_PER_PIXEL;
+
+    const uint8_t* src = upperFrame + off3;
+    const uint8_t* flr = floorFrame ? floorFrame + off3 : nullptr;
+    uint8_t* dst = displayBuffer + off3;
+    const uint8_t gr = packedBfiMap[pkOff];
+    const uint8_t bw = packedBfiMap[pkOff + 1];
+
+    dst[0] = isUp[clampBfiToTable(gr >> 4)]    ? src[0] : (flr ? flr[0] : 0);
+    dst[1] = isUp[clampBfiToTable(gr & 0x0Fu)] ? src[1] : (flr ? flr[1] : 0);
+    dst[2] = isUp[clampBfiToTable(bw >> 4)]    ? src[2] : (flr ? flr[2] : 0);
 }
 
 // ============================================================================

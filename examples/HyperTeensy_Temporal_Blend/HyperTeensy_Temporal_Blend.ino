@@ -2374,22 +2374,21 @@ void renderIndependentSubpixelBFI()
     }
   }
 
-  // Core phase render via library.
-  TemporalBFI::SolverRuntime::renderSubpixelBFI_RGBW(
-      latchedFrameBuffer, latchedFloorFrameBuffer,
-      bfiMapG, bfiMapR, bfiMapB, bfiMapW,
-      displayBuffer, LED_COUNT, bfiPhase);
-
-  // Post-pass: power estimation and diagnostics from the rendered output.
-  const uint8_t* dst = displayBuffer;
-
+  // Fused render + power/diagnostics pass: render each pixel by index,
+  // then accumulate power estimation in the same loop iteration.
   for (uint16_t i = 0; i < LED_COUNT; i++)
   {
+    TemporalBFI::SolverRuntime::renderPixelBFI_RGBW(
+        latchedFrameBuffer, latchedFloorFrameBuffer,
+        bfiMapG, bfiMapR, bfiMapB, bfiMapW,
+        displayBuffer, i, bfiPhase);
+
     const uint8_t bfiG = bfiMapG[i];
     const uint8_t bfiR = bfiMapR[i];
     const uint8_t bfiB = bfiMapB[i];
     const uint8_t bfiW = bfiMapW[i];
 
+    const uint8_t* dst = displayBuffer + (uint32_t)i * 4u;
     totalPowerQ8 += (uint32_t)POWER_WEIGHT_G * (uint32_t)dst[0] * (uint32_t)invCycleQ8[TemporalBFI::clampBfi(bfiG)];
     totalPowerQ8 += (uint32_t)POWER_WEIGHT_R * (uint32_t)dst[1] * (uint32_t)invCycleQ8[TemporalBFI::clampBfi(bfiR)];
     totalPowerQ8 += (uint32_t)POWER_WEIGHT_B * (uint32_t)dst[2] * (uint32_t)invCycleQ8[TemporalBFI::clampBfi(bfiB)];
@@ -2412,7 +2411,6 @@ void renderIndependentSubpixelBFI()
     }
 #endif
 
-    dst += 4;
   }
 
 #if ENABLE_PIPE_DIAGNOSTICS
