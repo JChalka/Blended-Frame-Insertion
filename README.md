@@ -252,6 +252,7 @@ Binary cube format: `[uint16 gridSize LE][uint16 channels LE][N³ × C × uint16
 | [CubeLUT3DDemo](examples/CubeLUT3DDemo/) | Demonstrates loading & using rgbw_lut_builder Cube LUTS at runtime. Includes SD binary & header array loading. | Library + SD.h |
 | [HyperTeensy_Temporal_Blend](examples/HyperTeensy_Temporal_Blend/) | Full production sketch — ObjectFLED parallel output, RawHID+Serial USB, independent solver/calibration headers. | ObjectFLED |
 | [Teensy_Temporal_Calibration](examples/Teensy_Temporal_Calibration/) | Calibration capture sketch — drives LED states for host-side colorimetric measurement via serial protocol. | ObjectFLED |
+| [ESP32S3_DoubleBuffer](examples/ESP32S3_DoubleBuffer/) | Double-buffered BFI rendering on ESP32-S3. Core 0 solves 16-bit color to BFI frames, core 1 swaps pointers (zero-copy) and drives sub-frame phases via FastLED. PSRAM-backed buffers, animated rainbow pattern. | FastLED |
 
 ### Build Status
 
@@ -327,12 +328,12 @@ pio run -e FrameworkDemo
 pio run -e FrameworkDemo -e RGB16InputDemo -e PrecomputeDemo
 ```
 
-All demo environments target Teensy 4.0 at 816 MHz with LTO. The `HyperTeensy` environment additionally requires ObjectFLED and uses a custom USB descriptor for combined RawHID + Serial.
+Most demo environments target Teensy 4.0 at 816 MHz with LTO. The `HyperTeensy` environment additionally requires ObjectFLED and uses a custom USB descriptor for combined RawHID + Serial. The `ESP32S3_DoubleBuffer` environment targets the ESP32-S3-DevKitC-1 via pioarduino with PSRAM and FastLED.
 
 ## Hardware Requirements
 
 - **Minimum**: Any Arduino-compatible board with ≥64 KB RAM (for 4096-entry LUTs)
-- **Recommended**: Teensy 4.0/4.1 (1 MB RAM, 600+ MHz ARM Cortex-M7)
+- **Recommended**: Teensy 4.0/4.1 (1 MB RAM, 600+ MHz ARM Cortex-M7) or ESP32-S3 (dual-core 240 MHz, PSRAM)
 - **Parallel output**: ObjectFLED (Teensy), FastLED (ESP32/Teensy), or I2SClocklessLedDriver (ESP32/S3)
 - **Target LED refresh rate**: ≥600 Hz (5 phases × ≥120 Hz perceived frame rate)
 

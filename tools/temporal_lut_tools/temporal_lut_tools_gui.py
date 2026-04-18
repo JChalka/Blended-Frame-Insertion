@@ -206,6 +206,7 @@ class App:
         self.transfer_selection_var = tk.StringVar(value=cfg.get("transfer_selection", "floor"))
         self.transfer_peak_nits_override_var = tk.StringVar(value=str(cfg.get("transfer_peak_nits_override", "")))
         self.transfer_nit_cap_var = tk.StringVar(value=str(cfg.get("transfer_nit_cap", "")))
+        self.transfer_exclude_white_var = tk.BooleanVar(value=bool(cfg.get("transfer_exclude_white", False)))
         self.transfer_per_channel_var = tk.BooleanVar(value=bool(cfg.get("transfer_per_channel", False)))
         self.transfer_channel_curve_vars = {
             ch: tk.StringVar(value=cfg.get(f"transfer_curve_{ch}", self.transfer_curve_var.get()))
@@ -340,6 +341,7 @@ class App:
             "transfer_selection": self.transfer_selection_var.get(),
             "transfer_peak_nits_override": self.transfer_peak_nits_override_var.get(),
             "transfer_nit_cap": self.transfer_nit_cap_var.get(),
+            "transfer_exclude_white": bool(self.transfer_exclude_white_var.get()),
             "transfer_per_channel": bool(self.transfer_per_channel_var.get()),
             "transfer_export_json": self.transfer_export_json_var.get(),
             "transfer_export_header": self.transfer_export_header_var.get(),
@@ -1140,6 +1142,7 @@ class App:
         ttk.Entry(transfer_meta, textvariable=self.transfer_peak_nits_override_var, width=10).pack(side="left", padx=6)
         ttk.Label(transfer_meta, text="Nit cap").pack(side="left", padx=(16, 0))
         ttk.Entry(transfer_meta, textvariable=self.transfer_nit_cap_var, width=10).pack(side="left", padx=6)
+        ttk.Checkbutton(transfer_meta, text="Exclude white", variable=self.transfer_exclude_white_var).pack(side="left", padx=(16, 0))
         ttk.Label(transfer_meta, text="Leave blank to use full measured peak.").pack(side="left", padx=(6, 0))
 
         self.transfer_channel_controls = ttk.LabelFrame(transfer_tab, text="Per-Channel Transfer Settings")
@@ -2556,6 +2559,8 @@ class App:
         transfer_nit_cap = self._parse_optional_float(self.transfer_nit_cap_var.get())
         if transfer_nit_cap is not None and float(transfer_nit_cap) > 0.0:
             args += ["--nit-cap", str(float(transfer_nit_cap))]
+        if bool(self.transfer_exclude_white_var.get()):
+            args += ["--exclude-white"]
         if bool(self.transfer_per_channel_var.get()):
             for ch in CHANNELS:
                 suffix = ch.lower()
@@ -2723,7 +2728,8 @@ class App:
 
         return 100.0, "fallback"
 
-    def _resolve_transfer_peak_metadata(self):
+    def _resolve_transfer_peak_metadata(self, exclude_white: bool = False):
+        active_channels = [ch for ch in CHANNELS if not (exclude_white and ch == "W")]
         override_nits = self._parse_optional_float(self.transfer_peak_nits_override_var.get())
         if override_nits is not None and float(override_nits) > 0.0:
             reference_peak_nits = float(override_nits)
@@ -2740,7 +2746,11 @@ class App:
                     peak = 0.0
                 if peak > 0.0:
                     channel_peaks[ch] = peak
-            if channel_peaks:
+            active_peaks = {ch: v for ch, v in channel_peaks.items() if ch in active_channels}
+            if active_peaks:
+                reference_peak_nits = max(float(v) for v in active_peaks.values())
+                source = "lut summary"
+            elif channel_peaks:
                 reference_peak_nits = max(float(v) for v in channel_peaks.values())
                 source = "lut summary"
             else:
@@ -2751,7 +2761,11 @@ class App:
         for ch in CHANNELS:
             channel_peaks.setdefault(ch, float(reference_peak_nits))
 
-        brightest_channel = max(channel_peaks, key=lambda name: float(channel_peaks[name])) if channel_peaks else "W"
+        brightest_channel = max(
+            (ch for ch in active_channels if ch in channel_peaks),
+            key=lambda name: float(channel_peaks[name]),
+            default="R" if exclude_white else "W",
+        ) if channel_peaks else ("R" if exclude_white else "W")
         return {
             "reference_peak_nits": float(reference_peak_nits),
             "source": str(source),
@@ -2776,15 +2790,26 @@ class App:
 
     def refresh_transfer_curve(self):
         self._save_config()
+        exclude_white = bool(self.transfer_exclude_white_var.get())
         ch = self.preview_channel_var.get()
+        if exclude_white and ch == "W":
+            ch = "R"  # fall back to R when previewing with white excluded
         ladder = self._load_monotonic_ladder_preview(ch)
         buckets = self._resolve_transfer_bucket_count()
-        peak_meta = self._resolve_transfer_peak_metadata()
+        peak_meta = self._resolve_transfer_peak_metadata(exclude_white=exclude_white)
         peak_nits = float(peak_meta["channel_peak_nits"].get(ch, peak_meta["reference_peak_nits"]))
         peak_source = peak_meta["source"]
         reference_peak_nits = float(peak_meta["reference_peak_nits"])
         brightest_channel = str(peak_meta["brightest_channel"])
         nit_cap = self._parse_optional_float(self.transfer_nit_cap_var.get())
+
+        # When white is excluded and no explicit nit cap, auto-cap to brightest RGB.
+        if exclude_white and nit_cap is None:
+            rgb_peaks = [float(peak_meta["channel_peak_nits"].get(c, 0.0)) for c in ["R", "G", "B"]]
+            max_rgb = max(rgb_peaks) if rgb_peaks else 0.0
+            if max_rgb > 0.0:
+                nit_cap = max_rgb
+
         nit_cap_enabled = nit_cap is not None and float(nit_cap) > 0.0 and reference_peak_nits > 0.0
         effective_nit_cap = min(float(nit_cap), float(reference_peak_nits)) if nit_cap_enabled else None
         normalized_limit = (float(effective_nit_cap) / float(reference_peak_nits)) if nit_cap_enabled else 1.0

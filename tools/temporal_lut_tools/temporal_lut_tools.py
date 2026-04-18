@@ -6849,10 +6849,11 @@ def _load_transfer_lut_summary(lut_dir: Path):
         return {}
 
 
-def _resolve_transfer_peak_metadata(lut_dir: Path, peak_nits_override: float | None = None):
+def _resolve_transfer_peak_metadata(lut_dir: Path, peak_nits_override: float | None = None, exclude_white: bool = False):
     override = None if peak_nits_override is None else float(peak_nits_override)
     channel_peaks = {}
     summary = _load_transfer_lut_summary(lut_dir)
+    active_channels = [ch for ch in CHANNELS if not (exclude_white and ch == "W")]
 
     for ch in CHANNELS:
         raw_peak = ((summary or {}).get("channels", {}).get(ch, {}) or {}).get("max_estimated_nobfi_Y")
@@ -6863,9 +6864,13 @@ def _resolve_transfer_peak_metadata(lut_dir: Path, peak_nits_override: float | N
         if peak > 0.0:
             channel_peaks[ch] = peak
 
+    active_peaks = {ch: v for ch, v in channel_peaks.items() if ch in active_channels}
     if override is not None and override > 0.0:
         reference_peak_nits = float(override)
         reference_source = "override"
+    elif active_peaks:
+        reference_peak_nits = max(float(v) for v in active_peaks.values())
+        reference_source = "lut_summary"
     elif channel_peaks:
         reference_peak_nits = max(float(v) for v in channel_peaks.values())
         reference_source = "lut_summary"
@@ -6881,13 +6886,18 @@ def _resolve_transfer_peak_metadata(lut_dir: Path, peak_nits_override: float | N
         ch: float(channel_peaks.get(ch, reference_peak_nits))
         for ch in CHANNELS
     }
-    brightest_channel = max(filled_channel_peaks, key=lambda ch: float(filled_channel_peaks[ch])) if filled_channel_peaks else "W"
+    brightest_channel = max(
+        (ch for ch in active_channels if ch in filled_channel_peaks),
+        key=lambda ch: float(filled_channel_peaks[ch]),
+        default="R" if exclude_white else "W",
+    ) if filled_channel_peaks else ("R" if exclude_white else "W")
 
     return {
         "reference_peak_nits": float(reference_peak_nits),
         "reference_peak_source": str(reference_source),
         "brightest_channel": str(brightest_channel),
         "channel_peak_nits": filled_channel_peaks,
+        "exclude_white": bool(exclude_white),
     }
 
 
@@ -6939,7 +6949,8 @@ def build_transfer_curve_preview(
     selection: str = "floor",
     channel_configs: dict | None = None,
     peak_nits_override: float | None = None,
-    nit_cap: float | None = None):
+    nit_cap: float | None = None,
+    exclude_white: bool = False):
     requested_bucket_count = int(bucket_count)
     if requested_bucket_count > 0:
         bucket_count = max(2, requested_bucket_count)
@@ -6952,13 +6963,25 @@ def build_transfer_curve_preview(
         shoulder=shoulder,
         channel_configs=channel_configs,
     )
-    peak_meta = _resolve_transfer_peak_metadata(lut_dir, peak_nits_override=peak_nits_override)
+    peak_meta = _resolve_transfer_peak_metadata(lut_dir, peak_nits_override=peak_nits_override, exclude_white=exclude_white)
+
+    # When white is excluded and no explicit nit cap is given, auto-cap to the
+    # brightest non-white channel so the transfer curve stays within RGB range.
+    effective_nit_cap = nit_cap
+    if exclude_white and effective_nit_cap is None:
+        rgb_peaks = [float(peak_meta["channel_peak_nits"].get(ch, 0.0)) for ch in ["R", "G", "B"]]
+        max_rgb = max(rgb_peaks) if rgb_peaks else 0.0
+        if max_rgb > 0.0:
+            effective_nit_cap = max_rgb
+
     nit_cap_meta = _resolve_transfer_nit_cap_metadata(
         peak_meta["reference_peak_nits"],
-        nit_cap=nit_cap,
+        nit_cap=effective_nit_cap,
     )
+    active_channels = [ch for ch in CHANNELS if not (exclude_white and ch == "W")]
     out = {
         "format": "TemporalBFI_TransferCurve_v1",
+        "exclude_white": bool(exclude_white),
         "curve": {
             "type": shared_curve["type"],
             "gamma": float(shared_curve["gamma"]),
@@ -6978,7 +7001,7 @@ def build_transfer_curve_preview(
         "channels": {},
     }
 
-    for ch in CHANNELS:
+    for ch in active_channels:
         mono = load_monotonic_ladder(lut_dir, ch)
         curve_cfg = resolved_channel_curves[ch]
         channel_peak_nits = float(peak_meta["channel_peak_nits"].get(ch, peak_meta["reference_peak_nits"]))
@@ -7018,13 +7041,15 @@ def export_transfer_json(
     selection: str = "floor",
     channel_configs: dict | None = None,
     peak_nits_override: float | None = None,
-    nit_cap: float | None = None):
+    nit_cap: float | None = None,
+    exclude_white: bool = False):
     data = build_transfer_curve_preview(
         lut_dir, bucket_count=bucket_count, curve=curve, gamma=gamma,
         shadow_lift=shadow_lift, shoulder=shoulder, selection=selection,
         channel_configs=channel_configs,
         peak_nits_override=peak_nits_override,
         nit_cap=nit_cap,
+        exclude_white=exclude_white,
     )
     out_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -7039,17 +7064,21 @@ def export_transfer_header(
     selection: str = "floor",
     channel_configs: dict | None = None,
     peak_nits_override: float | None = None,
-    nit_cap: float | None = None):
+    nit_cap: float | None = None,
+    exclude_white: bool = False):
     data = build_transfer_curve_preview(
         lut_dir, bucket_count=bucket_count, curve=curve, gamma=gamma,
         shadow_lift=shadow_lift, shoulder=shoulder, selection=selection,
         channel_configs=channel_configs,
         peak_nits_override=peak_nits_override,
         nit_cap=nit_cap,
+        exclude_white=exclude_white,
     )
     resolved_bucket_count = int(data["bucket_count"])
     curve_meta = dict(data.get("curve", {}))
     nit_cap_meta = dict(curve_meta.get("nit_cap", {}))
+    white_excluded = bool(data.get("exclude_white", False))
+    header_channels = [ch for ch in CHANNELS if ch in data["channels"]]
     lines = [
         "// Auto-generated transfer curve preview header v12",
         "#pragma once",
@@ -7065,12 +7094,13 @@ def export_transfer_header(
         f"static constexpr float REQUESTED_NIT_CAP = {float(nit_cap_meta.get('requested_nits') or 0.0):.6f}f;",
         f"static constexpr float EFFECTIVE_NIT_CAP = {float(nit_cap_meta.get('effective_nits') or 0.0):.6f}f;",
         f"static constexpr float NIT_CAP_NORMALIZED_LIMIT = {float(nit_cap_meta.get('normalized_limit', 1.0)):.9f}f;",
+        f"static const uint8_t WHITE_EXCLUDED = {1 if white_excluded else 0};",
         "",
     ]
-    for ch in CHANNELS:
+    for ch in header_channels:
         lines.append(f"static constexpr float PEAK_NITS_{ch} = {float(data.get('channel_peak_nits', {}).get(ch, 0.0)):.6f}f;")
     lines.append("")
-    for ch in CHANNELS:
+    for ch in header_channels:
         chd = data["channels"][ch]
         lines.append(f"static const uint16_t TARGET_{ch}[{resolved_bucket_count}] PROGMEM = {{")
         for i in range(0, resolved_bucket_count, 16):
@@ -7094,6 +7124,7 @@ def _add_transfer_curve_parser_args(parser):
     parser.add_argument("--shoulder", type=float, default=0.0)
     parser.add_argument("--peak-nits-override", type=float, help="Optional absolute reference peak in nits. When omitted, the brightest measured channel from lut_summary.json is used")
     parser.add_argument("--nit-cap", type=float, help="Optional absolute nit cap referenced to the brightest measured channel peak. Bucket count remains unchanged")
+    parser.add_argument("--exclude-white", action="store_true", default=False, help="Exclude the white (W) channel from export and auto-cap nits to the brightest RGB channel")
     parser.add_argument("--selection", choices=["floor", "nearest"], default="floor")
     for ch in CHANNELS:
         suffix = ch.lower()
@@ -7907,6 +7938,7 @@ def main():
             channel_configs=channel_configs,
             peak_nits_override=args.peak_nits_override,
             nit_cap=args.nit_cap,
+            exclude_white=args.exclude_white,
         )
         print(json.dumps({"ok": True, "out": args.out}, indent=2))
     elif args.cmd == "export-transfer-header":
@@ -7923,6 +7955,7 @@ def main():
             channel_configs=channel_configs,
             peak_nits_override=args.peak_nits_override,
             nit_cap=args.nit_cap,
+            exclude_white=args.exclude_white,
         )
         print(json.dumps({"ok": True, "out": args.out}, indent=2))
     elif args.cmd == "export-luma-weights-json":
