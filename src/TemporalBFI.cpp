@@ -18,11 +18,11 @@ void SolverRuntime::attachLUTs(uint8_t* valueLUT, uint8_t* bfiLUT,
     m_lutSize = lutSize;
 }
 
-void SolverRuntime::precompute(SolverFn fn)
+void SolverRuntime::precompute(SolverFn fn, uint8_t numChannels)
 {
     if (!fn || !m_valueLUT || !m_bfiLUT || m_lutSize < 2u) return;
 
-    for (uint8_t ch = 0; ch < 4; ++ch)
+    for (uint8_t ch = 0; ch < numChannels; ++ch)
     {
         const size_t offset = (size_t)ch * (size_t)m_lutSize;
         for (size_t i = 0; i < m_lutSize; ++i)
@@ -42,10 +42,11 @@ void SolverRuntime::precompute(SolverFn fn)
 }
 
 void SolverRuntime::loadPrecomputed(const uint8_t* srcValue, const uint8_t* srcBfi,
-                                    const uint8_t* srcFloor, const uint16_t* srcOutputQ16)
+                                    const uint8_t* srcFloor, const uint16_t* srcOutputQ16,
+                                    uint8_t numChannels)
 {
     if (!m_valueLUT || !m_bfiLUT || m_lutSize < 2u) return;
-    const size_t totalEntries = (size_t)4 * (size_t)m_lutSize;
+    const size_t totalEntries = (size_t)numChannels * (size_t)m_lutSize;
 
     memcpy(m_valueLUT, srcValue, totalEntries);
     memcpy(m_bfiLUT, srcBfi, totalEntries);

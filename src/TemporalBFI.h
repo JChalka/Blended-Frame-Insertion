@@ -326,10 +326,11 @@ public:
     // Precompute all LUTs by calling the supplied solver function for each
     // (q16, channel) pair.  The solver function comes from per_bfi_v3.h
     // and depends on user-supplied ladder data, so it can't be in the .cpp.
-    void precompute(SolverFn fn);
+    void precompute(SolverFn fn, uint8_t numChannels = 4);
 
     void loadPrecomputed(const uint8_t* srcValue, const uint8_t* srcBfi,
-                         const uint8_t* srcFloor, const uint16_t* srcOutputQ16);
+                         const uint8_t* srcFloor, const uint16_t* srcOutputQ16,
+                         uint8_t numChannels = 4);
 
     // ----- Configuration -----
 
