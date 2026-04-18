@@ -1,6 +1,6 @@
 # TemporalBFI Build Report
 
-**11/11** environments built successfully.
+**12/12** environments built successfully.
 
 ## Teensy (IMXRT1062)
 
@@ -18,7 +18,15 @@
 | PackedBFIMapDemo | SUCCESS | 133.0 KB | 1851.0 KB | 92.5 KB | 392.8 KB | 12.1 KB | 499.9 KB |
 | CubeLUT3DDemo | SUCCESS | 160.0 KB | 7776.0 KB | 120.3 KB | 389.9 KB | 12.1 KB | 499.9 KB |
 
+## ESP32
+
+| Environment | Status | Flash Code | Flash Data | Flash Used | Flash Free | RAM (DIRAM) | DIRAM Free | IRAM | IRAM Free | Image |
+|-------------|--------|------------|------------|------------|------------|-------------|------------|------|-----------|-------|
+| ESP32S3_DoubleBuffer | SUCCESS | 183.5 KB | 208.2 KB | 391.7 KB | 7800.3 KB | 93.6 KB | 240.2 KB | - | - | 476.1 KB |
+
 Target: **Teensy 4.0 (IMXRT1062) — 1984 KB Flash, 512 KB RAM1, 512 KB RAM2**<br>Environments: HyperTeensy, Calibration, FrameworkDemo, RGB16InputDemo, ColorCalibrationABDemo, PrecomputeDemo, rgbwNoExtractionDemo, True16RGBWGradientDemo, TemporalFastLEDDemo, PackedBFIMapDemo
 
 Target: **Teensy 4.1 (IMXRT1062) — 7936 KB Flash, 512 KB RAM1, 512 KB RAM2, PSRAM + QSPI pads**<br>Environments: CubeLUT3DDemo
+
+Target: **ESP32-S3 DevKitC-1 — 8 MB Flash, 512 KB SRAM, PSRAM**<br>Environments: ESP32S3_DoubleBuffer
 
