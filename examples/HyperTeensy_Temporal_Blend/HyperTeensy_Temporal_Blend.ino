@@ -2486,10 +2486,6 @@ void setup() {
   cfg.maxBFI = MAX_BFI_FRAMES;
   cfg.relativeErrorDivisor = 24;
   cfg.minErrorQ16 = 64;
-  cfg.minValueRatioNumerator = 3;
-  cfg.minValueRatioDenominator = 8;
-  cfg.lowEndProtectThreshold = 48;
-  cfg.lowEndMaxDrop = 10;
 
   // Register solver callbacks (decoupled from library .cpp).
   solver.setCalibrationFunction([](uint16_t q16, uint8_t ch) -> uint16_t {

@@ -1331,11 +1331,25 @@ class App:
             self.root.after(0, lambda: self.set_busy(True))
             self.root.after(0, lambda: self.log_line("Running: " + " ".join(args)))
             try:
-                proc = subprocess.run(args, capture_output=True, text=True, cwd=str(self.script_dir))
-                stdout = proc.stdout.strip(); stderr = proc.stderr.strip()
+                proc = subprocess.Popen(
+                    args,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    cwd=str(self.script_dir),
+                )
+                # Stream stderr lines live (progress messages).
+                stderr_lines = []
+                for line in proc.stderr:
+                    line = line.rstrip("\n\r")
+                    if line:
+                        stderr_lines.append(line)
+                        self.root.after(0, lambda l=line: self.log_line(l))
+                stdout = proc.stdout.read().strip()
+                proc.wait()
+                stderr = "\n".join(stderr_lines)
                 def finish():
                     if stdout: self.log_line(stdout)
-                    if stderr: self.log_line(stderr)
                     self.log_line(f"Exit code: {proc.returncode}")
                     self.set_busy(False)
                     if proc.returncode == 0 and on_success:
@@ -3006,7 +3020,6 @@ class App:
         args = [
             sys.executable, str(self.tool_path), "export-precomputed-solver-luts-header",
             "--solver-header", str(Path(self.precomputed_solver_source_header_var.get()).expanduser()),
-            "--calibration-header", str(Path(self.precomputed_calibration_header_var.get()).expanduser()),
             "--out", str(out_path),
             "--max-bfi", str(max_bfi),
             "--solver-fixed-bfi-levels", str(fixed_levels),

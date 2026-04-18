@@ -72,14 +72,14 @@ struct EncodedState {
 struct PolicyConfig {
     uint16_t minErrorQ16 = 64;
     uint16_t relativeErrorDivisor = 24;
-    uint8_t minValueRatioNumerator = 3;
-    uint8_t minValueRatioDenominator = 8;
-    uint8_t lowEndProtectThreshold = 48;
-    uint8_t lowEndMaxDrop = 10;
+    uint8_t minValueRatioNumerator = 0;
+    uint8_t minValueRatioDenominator = 1;
+    uint8_t lowEndProtectThreshold = 0;
+    uint8_t lowEndMaxDrop = 0;
     uint8_t maxBFI = 4;
-    bool preferHigherBFI = true;
+    bool preferHigherBFI = false;
     uint8_t preferredMinBFI = 0;
-    uint8_t highlightBypassStart = 240;
+    uint8_t highlightBypassStart = 255;
     bool enableInputQ16Calibration = false;
 };
 

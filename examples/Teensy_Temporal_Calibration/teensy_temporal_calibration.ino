@@ -415,10 +415,6 @@ void setup() {
   cfg.maxBFI = MAX_BFI_FRAMES;
   cfg.relativeErrorDivisor = 24;
   cfg.minErrorQ16 = 64;
-  cfg.minValueRatioNumerator = 3;
-  cfg.minValueRatioDenominator = 8;
-  cfg.lowEndProtectThreshold = 48;
-  cfg.lowEndMaxDrop = 10;
   cfg.enableInputQ16Calibration = false;
 
   solver.attachLUTs(&solverValueLUT[0][0], &solverBFILUT[0][0],

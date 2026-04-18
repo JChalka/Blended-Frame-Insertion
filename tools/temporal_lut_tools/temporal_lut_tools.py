@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import argparse, csv, html, json, math, re
+import argparse, csv, html, json, math, re, sys
 from bisect import bisect_left
 from datetime import datetime, timezone
 from pathlib import Path
@@ -394,7 +394,6 @@ def _extract_single_channel_temporal_state(rec: dict, default_mode: str = "fill8
         "channel": ch,
         "mode": normalized_mode,
         "lower_value": int(lower[ch]),
-        "upper_value": int(upper[ch]),
         "value": int(upper[ch]),
         "bfi": int(bfis[ch]),
     }
@@ -415,7 +414,6 @@ def load_json_measurements(path: Path):
                 "mode": ident["mode"],
                 "value": int(ident["value"]),
                 "lower_value": int(ident["lower_value"]),
-                "upper_value": int(ident["upper_value"]),
                 "bfi": int(ident["bfi"]),
                 "Y": float(meas["Y"]), "X": meas.get("X"), "x": meas.get("x"), "y": meas.get("y")
             })
@@ -441,7 +439,6 @@ def load_plan_capture_csvs(path: Path):
                         "mode": ident["mode"],
                         "value": int(ident["value"]),
                         "lower_value": int(ident["lower_value"]),
-                        "upper_value": int(ident["upper_value"]),
                         "bfi": int(ident["bfi"]),
                         "Y": float(row["Y"]),
                         "X": float(row["X"]) if row.get("X") not in (None, "") else None,
@@ -484,7 +481,6 @@ def dedupe_ladder_states(ladder):
             e["output_q16"],
             e["bfi"],
             int(e.get("lower_value", 0)),
-            int(e.get("upper_value", e.get("value", 0))),
             e["value"],
         ),
     )
@@ -504,7 +500,6 @@ def _ensure_explicit_black_ladder_state(ladder):
     black_entry = {
         "mode": "fill8",
         "lower_value": 0,
-        "upper_value": 0,
         "value": 0,
         "bfi": 0,
         "estimated_output": 0.0,
@@ -525,7 +520,6 @@ def build_monotonic_ladder(deduped_ladder):
             "rank": len(mono),
             "mode": str(e.get("mode", "fill8")),
             "lower_value": int(e.get("lower_value", 0)),
-            "upper_value": int(e.get("upper_value", e.get("value", 0))),
             "value": int(e["value"]),
             "bfi": int(e["bfi"]),
             "output_q16": q16,
@@ -544,7 +538,7 @@ def build_luts(measure_dir: Path, out_dir: Path):
             r["channel"],
             str(r.get("mode", "fill8")),
             int(r.get("lower_value", 0)),
-            int(r.get("upper_value", r.get("value", 0))),
+            int(r["value"]),
             int(r["bfi"]),
         )].append(r["Y"])
 
@@ -559,14 +553,12 @@ def build_luts(measure_dir: Path, out_dir: Path):
         if x is None or y is None or Y is None:
             continue
         lower_value = int(r.get("lower_value", 0))
-        upper_value = int(r.get("upper_value", r.get("value", 0)))
         mode = "blend8" if str(r.get("mode", "fill8")).lower() == "blend8" or lower_value > 0 else "fill8"
         xy_point_rows.append({
             "channel": str(r["channel"]),
             "mode": mode,
             "lower_value": lower_value,
-            "upper_value": upper_value,
-            "value": upper_value,
+            "value": int(r["value"]),
             "bfi": int(r["bfi"]),
             "X": float(r.get("X")) if r.get("X") is not None else "",
             "Y": float(Y),
@@ -577,14 +569,13 @@ def build_luts(measure_dir: Path, out_dir: Path):
     for ch in CHANNELS:
         raw_est = defaultdict(list)
         ladder = []
-        for (channel, mode, lower_value, upper_value, bfi), ys in grouped.items():
+        for (channel, mode, lower_value, value, bfi), ys in grouped.items():
             if channel != ch:
                 continue
             y_avg = mean(ys)
             if y_avg is None:
                 continue
             mode = "blend8" if str(mode).lower() == "blend8" or int(lower_value) > 0 else "fill8"
-            value = int(upper_value)
             y_est = None
             if mode == "fill8" and int(lower_value) == 0:
                 y_est = y_avg * (bfi + 1)
@@ -593,8 +584,7 @@ def build_luts(measure_dir: Path, out_dir: Path):
                 "channel": ch,
                 "mode": mode,
                 "lower_value": int(lower_value),
-                "upper_value": int(upper_value),
-                "value": value,
+                "value": int(value),
                 "bfi": bfi,
                 "y_measured_avg": y_avg,
                 "y_est_nobfi": y_est,
@@ -603,7 +593,6 @@ def build_luts(measure_dir: Path, out_dir: Path):
             ladder.append({
                 "mode": mode,
                 "lower_value": int(lower_value),
-                "upper_value": int(upper_value),
                 "value": int(value),
                 "bfi": int(bfi),
                 "estimated_output": float(y_avg),
@@ -657,7 +646,7 @@ def build_luts(measure_dir: Path, out_dir: Path):
         with open(out_dir / f"{ch.lower()}_measured_points.csv", "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(
                 f,
-                fieldnames=["plotted_value", "value", "bfi", "mode", "lower_value", "upper_value", "normalized_output"],
+                fieldnames=["plotted_value", "value", "bfi", "mode", "lower_value", "normalized_output"],
             )
             w.writeheader()
             for entry in ladder:
@@ -667,7 +656,6 @@ def build_luts(measure_dir: Path, out_dir: Path):
                     "bfi": int(entry["bfi"]),
                     "mode": str(entry.get("mode", "fill8")),
                     "lower_value": int(entry.get("lower_value", 0)),
-                    "upper_value": int(entry.get("upper_value", entry.get("value", 0))),
                     "normalized_output": float(entry["normalized_output"]),
                 })
 
@@ -681,7 +669,7 @@ def build_luts(measure_dir: Path, out_dir: Path):
         with open(out_dir / f"{ch.lower()}_temporal_ladder.csv", "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(
                 f,
-                fieldnames=["mode", "lower_value", "upper_value", "value", "bfi", "estimated_output", "output_q16", "normalized_output"],
+                fieldnames=["mode", "lower_value", "value", "bfi", "estimated_output", "output_q16", "normalized_output"],
             )
             w.writeheader()
             w.writerows(deduped)
@@ -690,7 +678,7 @@ def build_luts(measure_dir: Path, out_dir: Path):
         with open(out_dir / f"{ch.lower()}_monotonic_ladder.csv", "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(
                 f,
-                fieldnames=["rank", "mode", "lower_value", "upper_value", "value", "bfi", "output_q16", "normalized_output", "delta_q16_from_prev"],
+                fieldnames=["rank", "mode", "lower_value", "value", "bfi", "output_q16", "normalized_output", "delta_q16_from_prev"],
             )
             w.writeheader()
             w.writerows(monotonic)
@@ -699,7 +687,7 @@ def build_luts(measure_dir: Path, out_dir: Path):
     with open(out_dir / "all_measurement_points.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(
             f,
-            fieldnames=["channel", "mode", "lower_value", "upper_value", "value", "bfi", "y_measured_avg", "y_est_nobfi", "samples"],
+            fieldnames=["channel", "mode", "lower_value", "value", "bfi", "y_measured_avg", "y_est_nobfi", "samples"],
         )
         w.writeheader()
         w.writerows(point_rows)
@@ -707,7 +695,7 @@ def build_luts(measure_dir: Path, out_dir: Path):
     with open(out_dir / "all_measurement_xy_points.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(
             f,
-            fieldnames=["channel", "mode", "lower_value", "upper_value", "value", "bfi", "X", "Y", "x", "y"],
+            fieldnames=["channel", "mode", "lower_value", "value", "bfi", "X", "Y", "x", "y"],
         )
         w.writeheader()
         w.writerows(xy_point_rows)
@@ -842,31 +830,6 @@ def _parse_named_u16_arrays(text: str):
     return arrays
 
 
-def _try_load_calibration_profile_8to16(arrays, required_max_bfi: int):
-    profiles = {}
-    per_bfi = {}
-
-    for color in CHANNELS:
-        key = f"LUT_{color}_8_TO_16"
-        if key not in arrays or len(arrays[key]) != 256:
-            return None
-        profiles[color] = arrays[key]
-
-        bfi_tables = {}
-        for bfi in range(int(required_max_bfi) + 1):
-            bfi_key = f"LUT_{color}_BFI{bfi}_8_TO_16"
-            if bfi_key not in arrays or len(arrays[bfi_key]) != 256:
-                return None
-            bfi_tables[bfi] = arrays[bfi_key]
-        per_bfi[color] = bfi_tables
-
-    return {
-        "mode": "legacy_8to16",
-        "profiles": profiles,
-        "per_bfi": per_bfi,
-    }
-
-
 def _try_load_calibration_profile_true16(arrays, text: str):
     luts = {}
     lengths = set()
@@ -900,22 +863,18 @@ def _try_load_calibration_profile_true16(arrays, text: str):
     }
 
 
-def _load_calibration_for_solver_precompute(calibration_header: Path, required_max_bfi: int):
+def _load_calibration_for_solver_precompute(calibration_header: Path | None, required_max_bfi: int):
+    if calibration_header is None:
+        return {"mode": "none"}
+
     text = calibration_header.read_text(encoding="utf-8")
     arrays = _parse_named_u16_arrays(text)
-
-    legacy = _try_load_calibration_profile_8to16(arrays, required_max_bfi=required_max_bfi)
-    if legacy is not None:
-        return legacy
 
     true16 = _try_load_calibration_profile_true16(arrays, text)
     if true16 is not None:
         return true16
 
-    raise ValueError(
-        "Missing required calibration tables. Expected either legacy LUT_*_8_TO_16/LUT_*_BFIx_8_TO_16 "
-        "or True16 LUT_*_16_TO_16 tables."
-    )
+    return {"mode": "none"}
 
 
 def _load_runtime_solver_ladders(solver_header: Path):
@@ -926,9 +885,9 @@ def _load_runtime_solver_ladders(solver_header: Path):
         raise ValueError("Could not parse MAX_BFI from solver header")
     max_bfi = int(max_bfi_match.group(1))
 
-    array_pat = re.compile(r"static const TemporalBFI::LadderEntry LADDER_([RGBW])\[\]\s*=\s*\{(.*?)\};", re.S)
+    array_pat = re.compile(r"static const TemporalBFI::LadderEntry LADDER_([RGBW])\[\]\s*(?:PROGMEM\s*)?=\s*\{(.*?)\};", re.S)
     entry_pat = re.compile(r"\{\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\}")
-    u8_array_pat = re.compile(r"static const uint8_t LADDER_([RGBW])_(LOWER|UPPER)\[\]\s*=\s*\{(.*?)\};", re.S)
+    u8_array_pat = re.compile(r"static const uint8_t LADDER_([RGBW])_LOWER\[\]\s*(?:PROGMEM\s*)?=\s*\{(.*?)\};", re.S)
 
     ladders_by_color = {}
     for color, body in array_pat.findall(text):
@@ -944,25 +903,20 @@ def _load_runtime_solver_ladders(solver_header: Path):
         ladders_by_color[color] = entries
 
     ladder_bounds = {}
-    for color, bound_name, body in u8_array_pat.findall(text):
+    for color, body in u8_array_pat.findall(text):
         values = [max(0, min(255, int(v))) for v in re.findall(r"\d+", body)]
-        ladder_bounds.setdefault(color, {})[bound_name.lower()] = values
+        ladder_bounds[color] = values
 
     for color in CHANNELS:
         if color not in ladders_by_color:
             raise ValueError(f"Missing LADDER_{color} in solver header")
         if not ladders_by_color[color]:
             raise ValueError(f"LADDER_{color} has no entries")
-        bounds = ladder_bounds.get(color, {})
-        lower_values = bounds.get("lower", [0] * len(ladders_by_color[color]))
-        upper_values = bounds.get("upper", [int(e["value"]) for e in ladders_by_color[color]])
+        lower_values = ladder_bounds.get(color, [0] * len(ladders_by_color[color]))
         if len(lower_values) != len(ladders_by_color[color]):
             raise ValueError(f"LADDER_{color}_LOWER length mismatch")
-        if len(upper_values) != len(ladders_by_color[color]):
-            raise ValueError(f"LADDER_{color}_UPPER length mismatch")
         for idx, entry in enumerate(ladders_by_color[color]):
             entry["lower_value"] = int(lower_values[idx])
-            entry["upper_value"] = int(upper_values[idx])
             entry["mode"] = "blend8" if int(lower_values[idx]) > 0 else "fill8"
 
     return {
@@ -1054,7 +1008,7 @@ def _apply_constraints_to_target_q16(target_q16: int, constraints):
 
 def _calibrate_input_q16_for_solver(q16: int, solver_channel: int, calibration):
     clamped_q16 = int(max(0, min(65535, int(q16))))
-    if str(calibration.get("mode", "legacy_8to16")) != "true16_input_q16":
+    if str(calibration.get("mode", "none")) != "true16_input_q16":
         return clamped_q16
 
     if int(solver_channel) < 0 or int(solver_channel) >= len(SOLVER_CHANNEL_ORDER):
@@ -1077,41 +1031,25 @@ def _calibrate_input_q16_for_solver(q16: int, solver_channel: int, calibration):
     return int(lut[idx])
 
 
-def _prepare_solver_channel_entries(channel_ladder, color, calibration):
+def _prepare_solver_channel_entries(channel_ladder, color):
     entries = []
     entries_by_bfi = defaultdict(list)
-    use_legacy_candidates = str(calibration.get("mode", "legacy_8to16")) == "legacy_8to16"
-    bfi_tables = calibration.get("per_bfi", {}).get(color, {}) if use_legacy_candidates else {}
-    max_bfi_key = max(int(k) for k in bfi_tables.keys()) if bfi_tables else 0
 
     for idx, e in enumerate(channel_ladder):
         bfi = int(e["bfi"])
         value = int(e["value"])
-        if use_legacy_candidates:
-            table = bfi_tables.get(bfi, bfi_tables[max_bfi_key])
-            candidate_q16_legacy = int(table[value])
-        else:
-            candidate_q16_legacy = int(e["output_q16"])
         prepared = {
             "output_q16": int(e["output_q16"]),
             "value": value,
             "lower_value": int(e.get("lower_value", 0)),
-            "upper_value": int(e.get("upper_value", value)),
             "mode": str(e.get("mode", "fill8")),
             "bfi": bfi,
             "ladder_index": idx,
-            "candidate_q16_legacy": candidate_q16_legacy,
         }
         entries.append(prepared)
         entries_by_bfi[bfi].append(prepared)
 
     return entries, entries_by_bfi
-
-
-def _candidate_q16(entry, use_legacy_candidates):
-    if use_legacy_candidates:
-        return int(entry["candidate_q16_legacy"])
-    return int(entry["output_q16"])
 
 
 def _solve_state_from_q16_internal(
@@ -1120,12 +1058,12 @@ def _solve_state_from_q16_internal(
     channel_entries,
     policy,
     constraints=None,
-    use_legacy_candidates=True,
     constrained_entries=None,
 ):
     out = {
         "value": 0,
         "bfi": 0,
+        "lower_value": 0,
         "output_q16": 0,
         "ladder_index": 0,
     }
@@ -1153,7 +1091,7 @@ def _solve_state_from_q16_internal(
         if not _passes_resolution_guard(int(input8_approx), int(e["value"]), policy):
             continue
 
-        candidate_q16 = _candidate_q16(e, use_legacy_candidates)
+        candidate_q16 = int(e["output_q16"])
         err = abs(int(candidate_q16) - int(target_q16))
         if err > tolerance:
             continue
@@ -1170,7 +1108,7 @@ def _solve_state_from_q16_internal(
         if err > best_err:
             continue
 
-        best_q16 = _candidate_q16(best_entry, use_legacy_candidates)
+        best_q16 = int(best_entry["output_q16"])
         if prefer_higher_bfi:
             if int(e["bfi"]) > int(best_entry["bfi"]):
                 best_entry = e
@@ -1191,7 +1129,8 @@ def _solve_state_from_q16_internal(
     if best_entry is not None:
         out["value"] = int(best_entry["value"])
         out["bfi"] = int(best_entry["bfi"])
-        out["output_q16"] = int(_candidate_q16(best_entry, use_legacy_candidates))
+        out["lower_value"] = int(best_entry.get("lower_value", best_entry["value"]))
+        out["output_q16"] = int(best_entry["output_q16"])
         out["ladder_index"] = int(best_entry["ladder_index"])
         return out
 
@@ -1210,7 +1149,7 @@ def _solve_state_from_q16_internal(
         if not _passes_resolution_guard(int(input8_approx), int(e["value"]), policy):
             continue
 
-        candidate_q16 = _candidate_q16(e, use_legacy_candidates)
+        candidate_q16 = int(e["output_q16"])
         if int(candidate_q16) > int(target_q16):
             continue
 
@@ -1233,7 +1172,8 @@ def _solve_state_from_q16_internal(
     if found_floor and best_entry is not None:
         out["value"] = int(best_entry["value"])
         out["bfi"] = int(best_entry["bfi"])
-        out["output_q16"] = int(_candidate_q16(best_entry, use_legacy_candidates))
+        out["lower_value"] = int(best_entry.get("lower_value", best_entry["value"]))
+        out["output_q16"] = int(best_entry["output_q16"])
         out["ladder_index"] = int(best_entry["ladder_index"])
         return out
 
@@ -1248,7 +1188,7 @@ def _solve_state_from_q16_internal(
             if int(e["bfi"]) > int(policy["max_bfi"]):
                 continue
 
-        candidate_q16 = _candidate_q16(e, use_legacy_candidates)
+        candidate_q16 = int(e["output_q16"])
         err = abs(int(candidate_q16) - int(target_q16))
         if best_entry is None or err < nearest_err:
             nearest_err = err
@@ -1271,27 +1211,25 @@ def _solve_state_from_q16_internal(
 
     out["value"] = int(best_entry["value"])
     out["bfi"] = int(best_entry["bfi"])
-    out["output_q16"] = int(_candidate_q16(best_entry, use_legacy_candidates))
+    out["lower_value"] = int(best_entry.get("lower_value", best_entry["value"]))
+    out["output_q16"] = int(best_entry["output_q16"])
     out["ladder_index"] = int(best_entry["ladder_index"])
     return out
 
 
 def _encode_state_from16(q16: int, channel_entries, policy, calibration, solver_channel: int):
     if int(q16) <= 0:
-        return {"value": 0, "bfi": 0, "output_q16": 0, "ladder_index": 0}
+        return {"value": 0, "bfi": 0, "lower_value": 0, "output_q16": 0, "ladder_index": 0}
 
     target_q16 = _calibrate_input_q16_for_solver(int(q16), int(solver_channel), calibration)
     input8_approx = (target_q16 * 255 + 32767) // 65535
     if input8_approx == 0:
         input8_approx = 1
-    use_legacy_candidates = str(calibration.get("mode", "legacy_8to16")) == "legacy_8to16"
     return _solve_state_from_q16_internal(
         target_q16,
         input8_approx,
         channel_entries,
         policy,
-        constraints=None,
-        use_legacy_candidates=use_legacy_candidates,
     )
 
 
@@ -1305,14 +1243,13 @@ def _encode_state_from16_constrained(
     constrained_entries=None,
 ):
     if int(q16) <= 0:
-        return {"value": 0, "bfi": 0, "output_q16": 0, "ladder_index": 0}
+        return {"value": 0, "bfi": 0, "lower_value": 0, "output_q16": 0, "ladder_index": 0}
 
     target_q16 = _apply_constraints_to_target_q16(int(q16), constraints)
     target_q16 = _calibrate_input_q16_for_solver(int(target_q16), int(solver_channel), calibration)
     input8_approx = (target_q16 * 255 + 32767) // 65535
     if input8_approx == 0 and target_q16 != 0:
         input8_approx = 1
-    use_legacy_candidates = str(calibration.get("mode", "legacy_8to16")) == "legacy_8to16"
 
     return _solve_state_from_q16_internal(
         target_q16,
@@ -1320,9 +1257,13 @@ def _encode_state_from16_constrained(
         channel_entries,
         policy,
         constraints=constraints,
-        use_legacy_candidates=use_legacy_candidates,
         constrained_entries=constrained_entries,
     )
+
+
+def _progress(msg: str):
+    """Print a progress message to stderr so it doesn't pollute JSON stdout."""
+    print(msg, file=sys.stderr, flush=True)
 
 
 def _build_solver_precomputed_tables(runtime_ladders, calibration, policy, solver_fixed_bfi_levels: int, solver_lut_size: int | None = None):
@@ -1343,15 +1284,16 @@ def _build_solver_precomputed_tables(runtime_ladders, calibration, policy, solve
         entries, by_bfi = _prepare_solver_channel_entries(
             runtime_ladders[solver_channel],
             color,
-            calibration,
         )
         prepared_entries.append(entries)
         prepared_entries_by_bfi.append(by_bfi)
 
     solver_value_lut = [[0] * resolved_solver_lut_size for _ in range(4)]
+    solver_floor_value_lut = [[0] * resolved_solver_lut_size for _ in range(4)]
     solver_bfi_lut = [[0] * resolved_solver_lut_size for _ in range(4)]
     solver_output_q16_lut = [[0] * resolved_solver_lut_size for _ in range(4)]
 
+    _progress(f"Building primary solver LUTs ({resolved_solver_lut_size} entries x 4 channels)...")
     for ch in range(4):
         for i in range(resolved_solver_lut_size):
             q16 = (int(i) * 65535) // int(resolved_solver_lut_size - 1)
@@ -1363,11 +1305,15 @@ def _build_solver_precomputed_tables(runtime_ladders, calibration, policy, solve
                 solver_channel=ch,
             )
             solver_value_lut[ch][i] = int(state["value"])
+            solver_floor_value_lut[ch][i] = int(state.get("lower_value", state["value"]))
             solver_bfi_lut[ch][i] = int(state["bfi"])
             solver_output_q16_lut[ch][i] = int(state["output_q16"])
         solver_value_lut[ch][0] = 0
+        solver_floor_value_lut[ch][0] = 0
         solver_bfi_lut[ch][0] = 0
+        _progress(f"  channel {ch}/3 ({SOLVER_CHANNEL_ORDER[ch]}) primary done")
 
+    _progress(f"Building per-BFI resolved LUTs ({fixed_levels} levels x {resolved_solver_lut_size} entries x 4 channels)...")
     solver_resolved_value_lut = [[[0] * resolved_solver_lut_size for _ in range(fixed_levels)] for _ in range(4)]
     solver_resolved_bfi_lut = [[[0] * resolved_solver_lut_size for _ in range(fixed_levels)] for _ in range(4)]
 
@@ -1397,7 +1343,9 @@ def _build_solver_precomputed_tables(runtime_ladders, calibration, policy, solve
                 solver_resolved_value_lut[ch][fixed_bfi][i] = int(state["value"])
                 solver_resolved_bfi_lut[ch][fixed_bfi][i] = int(state["bfi"])
                 solver_lower_floor_value_lut[ch][fixed_bfi][i] = int(state.get("lower_value", state["value"]))
+        _progress(f"  channel {ch}/3 ({SOLVER_CHANNEL_ORDER[ch]}) resolved done")
 
+    _progress(f"Building dither LUTs ({fixed_levels} levels x {resolved_solver_lut_size} entries x 4 channels)...")
     solver_legal_output_q16_for_value_bfi = [[[0] * 256 for _ in range(fixed_levels)] for _ in range(4)]
 
     for ch in range(4):
@@ -1476,11 +1424,14 @@ def _build_solver_precomputed_tables(runtime_ladders, calibration, policy, solve
                 solver_dither_lower_value_lut[ch][fixed_bfi][i] = int(lower_value)
                 solver_dither_upper_value_lut[ch][fixed_bfi][i] = int(upper_value)
                 solver_dither_upper_blend8_lut[ch][fixed_bfi][i] = int(max(0, min(255, blend8)))
+        _progress(f"  channel {ch}/3 ({SOLVER_CHANNEL_ORDER[ch]}) dither done")
 
+    _progress("All solver precomputed tables built.")
     return {
         "solverLUTSize": int(resolved_solver_lut_size),
         "solverBFILUT": solver_bfi_lut,
         "solverValueLUT": solver_value_lut,
+        "solverValueFloorLUT": solver_floor_value_lut,
         "solverOutputQ16LUT": solver_output_q16_lut,
         "solverResolvedValueForFixedBfiLUT": solver_resolved_value_lut,
         "solverResolvedBfiForFixedBfiLUT": solver_resolved_bfi_lut,
@@ -1545,21 +1496,22 @@ def _append_cpp_u8_3d(lines, name, table, fixed_levels):
 
 def export_precomputed_solver_luts_header(
     solver_header: Path,
-    calibration_header: Path,
     out_path: Path,
+    calibration_header: Path | None = None,
     max_bfi: int | None = None,
     solver_fixed_bfi_levels: int | None = None,
     solver_lut_size: int | None = None,
     min_error_q16: int = 64,
     relative_error_divisor: int = 24,
-    min_value_ratio_numerator: int = 3,
-    min_value_ratio_denominator: int = 8,
-    low_end_protect_threshold: int = 48,
-    low_end_max_drop: int = 10,
-    prefer_higher_bfi: bool = True,
+    min_value_ratio_numerator: int = 0,
+    min_value_ratio_denominator: int = 1,
+    low_end_protect_threshold: int = 0,
+    low_end_max_drop: int = 0,
+    prefer_higher_bfi: bool = False,
     preferred_min_bfi: int = 0,
-    highlight_bypass_start: int = 240,
+    highlight_bypass_start: int = 255,
 ):
+    _progress(f"Loading solver header: {solver_header}")
     runtime = _load_runtime_solver_ladders(solver_header)
     solver_header_max_bfi = int(runtime["max_bfi"])
 
@@ -1585,7 +1537,7 @@ def export_precomputed_solver_luts_header(
         )
 
     calibration = _load_calibration_for_solver_precompute(calibration_header, required_max_bfi=solver_header_max_bfi)
-    calibration_mode = str(calibration.get("mode", "legacy_8to16"))
+    calibration_mode = str(calibration.get("mode", "none"))
 
     policy = _default_solver_policy(effective_max_bfi)
     policy["min_error_q16"] = int(min_error_q16)
@@ -1608,6 +1560,7 @@ def export_precomputed_solver_luts_header(
                 f"solver_lut_size={effective_solver_lut_size} is smaller than derived ladder count {derived_solver_lut_size}"
             )
 
+    _progress(f"Building precomputed tables (LUT size={effective_solver_lut_size}, fixed_levels={fixed_levels}, max_bfi={effective_max_bfi})...")
     tables = _build_solver_precomputed_tables(
         runtime_ladders=runtime["ladders"],
         calibration=calibration,
@@ -1616,8 +1569,9 @@ def export_precomputed_solver_luts_header(
         solver_lut_size=effective_solver_lut_size,
     )
 
+    _progress(f"Emitting C++ header arrays...")
     lines = [
-        "// Auto-generated precomputed solver LUT header (v14)",
+        "// Auto-generated precomputed solver LUT header (v15)",
         "// Channel index order matches solver runtime: 0=G, 1=R, 2=B, 3=W",
         f"// Calibration mode: {calibration_mode}",
         "#pragma once",
@@ -1634,6 +1588,7 @@ def export_precomputed_solver_luts_header(
 
     _append_cpp_u8_2d(lines, "solverBFILUT", tables["solverBFILUT"])
     _append_cpp_u8_2d(lines, "solverValueLUT", tables["solverValueLUT"])
+    _append_cpp_u8_2d(lines, "solverValueFloorLUT", tables["solverValueFloorLUT"])
     _append_cpp_u16_2d(lines, "solverOutputQ16LUT", tables["solverOutputQ16LUT"])
     _append_cpp_u8_3d(
         lines,
@@ -1675,12 +1630,14 @@ def export_precomputed_solver_luts_header(
     lines.append("} // namespace TemporalBFIPrecomputedSolverLUTs")
     lines.append("")
 
+    _progress(f"Writing header to {out_path}...")
     out_path.write_text("\n".join(lines), encoding="utf-8")
+    _progress("Done.")
 
     return {
         "out": str(out_path),
         "solver_header": str(solver_header),
-        "calibration_header": str(calibration_header),
+        "calibration_header": str(calibration_header) if calibration_header is not None else None,
         "max_bfi": int(effective_max_bfi),
         "solver_fixed_bfi_levels": int(fixed_levels),
         "solver_lut_size": int(tables["solverLUTSize"]),
@@ -5258,8 +5215,6 @@ def _parse_transfer_curve_header_text(header_text, source_label="header"):
     bucket_count = int(bucket_match.group(1)) if bucket_match else None
 
     tables = {}
-    lower_tables = {}
-    upper_tables = {}
     for ch in CHANNELS:
         array_match = re.search(
             rf"static const uint16_t TARGET_{ch}\[(\d+)\]\s*=\s*\{{(.*?)\}};",
@@ -5281,35 +5236,11 @@ def _parse_transfer_curve_header_text(header_text, source_label="header"):
 
         tables[ch] = [int(_clamp_u16(v)) for v in values]
 
-        lower_match = re.search(
-            rf"static const uint8_t LOWER_{ch}\[(\d+)\]\s*=\s*\{{(.*?)\}};",
-            header_text,
-            re.S,
-        )
-        if lower_match:
-            lower_values = [int(v) for v in re.findall(r"\d+", lower_match.group(2))]
-            if len(lower_values) != int(lower_match.group(1)):
-                raise ValueError(f"LOWER_{ch} length mismatch")
-            lower_tables[ch] = [max(0, min(255, int(v))) for v in lower_values]
-
-        upper_match = re.search(
-            rf"static const uint8_t UPPER_{ch}\[(\d+)\]\s*=\s*\{{(.*?)\}};",
-            header_text,
-            re.S,
-        )
-        if upper_match:
-            upper_values = [int(v) for v in re.findall(r"\d+", upper_match.group(2))]
-            if len(upper_values) != int(upper_match.group(1)):
-                raise ValueError(f"UPPER_{ch} length mismatch")
-            upper_tables[ch] = [max(0, min(255, int(v))) for v in upper_values]
-
     return {
         "enabled": True,
         "source": str(source_label),
         "bucket_count": int(bucket_count or 0),
         "tables": tables,
-        "lower_tables": lower_tables,
-        "upper_tables": upper_tables,
     }
 
 
@@ -6986,7 +6917,7 @@ def choose_monotonic_state(monotonic, target_q16: int, selection: str = "floor")
         return {"value": 0, "bfi": 0, "output_q16": 0}
     target_q16 = int(max(0, min(65535, target_q16)))
     if target_q16 <= 0:
-        return {"value": 0, "bfi": 0, "output_q16": 0, "lower_value": 0, "upper_value": 0}
+        return {"value": 0, "bfi": 0, "output_q16": 0, "lower_value": 0}
     if selection == "nearest":
         return min(monotonic, key=lambda e: abs(int(e["output_q16"]) - target_q16))
     # default floor selection
@@ -7053,10 +6984,6 @@ def build_transfer_curve_preview(
         channel_peak_nits = float(peak_meta["channel_peak_nits"].get(ch, peak_meta["reference_peak_nits"]))
         target_q16 = []
         achieved_q16 = []
-        lower_values = []
-        upper_values = []
-        values = []
-        bfis = []
         for i in range(bucket_count):
             x = i / (bucket_count - 1)
             y = apply_transfer_curve_norm(
@@ -7072,19 +6999,11 @@ def build_transfer_curve_preview(
             state = choose_monotonic_state(mono, tq16, selection=selection)
             target_q16.append(tq16)
             achieved_q16.append(int(state.get("output_q16", 0)))
-            lower_values.append(int(state.get("lower_value", 0)))
-            upper_values.append(int(state.get("upper_value", state.get("value", 0))))
-            values.append(int(state.get("value", state.get("upper_value", 0))))
-            bfis.append(int(state.get("bfi", 0)))
         out["channels"][ch] = {
             "curve": dict(curve_cfg),
             "peak_nits": float(channel_peak_nits),
             "target_q16": target_q16,
             "achieved_q16": achieved_q16,
-            "lower_value": lower_values,
-            "upper_value": upper_values,
-            "value": values,
-            "bfi": bfis,
         }
     return out
 
@@ -7160,22 +7079,6 @@ def export_transfer_header(
         lines.append(f"static const uint16_t ACHIEVED_{ch}[{resolved_bucket_count}] PROGMEM = {{")
         for i in range(0, resolved_bucket_count, 16):
             lines.append("    " + ", ".join(str(v) for v in chd["achieved_q16"][i:i+16]) + ",")
-        lines.append("};\n")
-        lines.append(f"static const uint8_t VALUE_{ch}[{resolved_bucket_count}] PROGMEM = {{")
-        for i in range(0, resolved_bucket_count, 32):
-            lines.append("    " + ", ".join(str(v) for v in chd["value"][i:i+32]) + ",")
-        lines.append("};\n")
-        lines.append(f"static const uint8_t LOWER_{ch}[{resolved_bucket_count}] PROGMEM = {{")
-        for i in range(0, resolved_bucket_count, 32):
-            lines.append("    " + ", ".join(str(v) for v in chd["lower_value"][i:i+32]) + ",")
-        lines.append("};\n")
-        lines.append(f"static const uint8_t UPPER_{ch}[{resolved_bucket_count}] PROGMEM = {{")
-        for i in range(0, resolved_bucket_count, 32):
-            lines.append("    " + ", ".join(str(v) for v in chd["upper_value"][i:i+32]) + ",")
-        lines.append("};\n")
-        lines.append(f"static const uint8_t BFI_{ch}[{resolved_bucket_count}] PROGMEM = {{")
-        for i in range(0, resolved_bucket_count, 32):
-            lines.append("    " + ", ".join(str(v) for v in chd["bfi"][i:i+32]) + ",")
         lines.append("};\n")
     lines.append("} // namespace TemporalBFITransferCurve\n")
     out_path.write_text("\n".join(lines), encoding="utf-8")
@@ -7380,20 +7283,20 @@ def main():
 
     ap_export_solver_precomputed = sub.add_parser("export-precomputed-solver-luts-header")
     ap_export_solver_precomputed.add_argument("--solver-header", required=True)
-    ap_export_solver_precomputed.add_argument("--calibration-header", required=True)
+    ap_export_solver_precomputed.add_argument("--calibration-header", default=None, help="Optional calibration header; omit for no input calibration")
     ap_export_solver_precomputed.add_argument("--out", required=True)
     ap_export_solver_precomputed.add_argument("--max-bfi", type=int)
     ap_export_solver_precomputed.add_argument("--solver-fixed-bfi-levels", type=int)
     ap_export_solver_precomputed.add_argument("--solver-lut-size", type=int, default=0, help="Precomputed solver LUT size; use 0 to derive from the solver ladder counts")
     ap_export_solver_precomputed.add_argument("--min-error-q16", type=int, default=64)
     ap_export_solver_precomputed.add_argument("--relative-error-divisor", type=int, default=24)
-    ap_export_solver_precomputed.add_argument("--min-value-ratio-numerator", type=int, default=3)
-    ap_export_solver_precomputed.add_argument("--min-value-ratio-denominator", type=int, default=8)
-    ap_export_solver_precomputed.add_argument("--low-end-protect-threshold", type=int, default=48)
-    ap_export_solver_precomputed.add_argument("--low-end-max-drop", type=int, default=10)
-    ap_export_solver_precomputed.add_argument("--disable-prefer-higher-bfi", action="store_true")
+    ap_export_solver_precomputed.add_argument("--min-value-ratio-numerator", type=int, default=0)
+    ap_export_solver_precomputed.add_argument("--min-value-ratio-denominator", type=int, default=1)
+    ap_export_solver_precomputed.add_argument("--low-end-protect-threshold", type=int, default=0)
+    ap_export_solver_precomputed.add_argument("--low-end-max-drop", type=int, default=0)
+    ap_export_solver_precomputed.add_argument("--prefer-higher-bfi", action="store_true")
     ap_export_solver_precomputed.add_argument("--preferred-min-bfi", type=int, default=0)
-    ap_export_solver_precomputed.add_argument("--highlight-bypass-start", type=int, default=240)
+    ap_export_solver_precomputed.add_argument("--highlight-bypass-start", type=int, default=255)
 
     ap_patch = sub.add_parser("patch-plan")
     ap_patch.add_argument("--preset", choices=sorted(PATCH_PRESETS.keys()), required=True)
@@ -7732,8 +7635,8 @@ def main():
     elif args.cmd == "export-precomputed-solver-luts-header":
         result = export_precomputed_solver_luts_header(
             Path(args.solver_header),
-            Path(args.calibration_header),
             Path(args.out),
+            calibration_header=Path(args.calibration_header) if args.calibration_header else None,
             max_bfi=args.max_bfi,
             solver_fixed_bfi_levels=args.solver_fixed_bfi_levels,
             solver_lut_size=args.solver_lut_size if args.solver_lut_size and args.solver_lut_size > 0 else None,
@@ -7743,7 +7646,7 @@ def main():
             min_value_ratio_denominator=args.min_value_ratio_denominator,
             low_end_protect_threshold=args.low_end_protect_threshold,
             low_end_max_drop=args.low_end_max_drop,
-            prefer_higher_bfi=not args.disable_prefer_higher_bfi,
+            prefer_higher_bfi=args.prefer_higher_bfi,
             preferred_min_bfi=args.preferred_min_bfi,
             highlight_bypass_start=args.highlight_bypass_start,
         )
