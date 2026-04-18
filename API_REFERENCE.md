@@ -153,6 +153,7 @@
 
 | Kind | Signature | Description |
 |------|-----------|-------------|
+| field | `uint8_t numChannels` |  |
 | method | `bool advanceTick()` |  |
 | method | `uint16_t applyCalibration(uint16_t q16, uint8_t channel) const` |  |
 | method | `RgbwTargets applyCubeLUT3D(uint16_t rQ16, uint16_t gQ16, uint16_t bQ16) const` |  |
@@ -168,10 +169,10 @@
 | method | `uint8_t cycleLength() const` |  |
 | method | `void dumpLUTHeader(Print& out) const` |  |
 | method | `RgbwTargets extractRgbw(uint16_t rQ16, uint16_t gQ16, uint16_t bQ16) const` |  |
-| method | `void loadPrecomputed(const uint8_t* srcValue, const uint8_t* srcBfi, const uint8_t* srcFloor, const uint16_t* srcOutputQ16)` |  |
+| method | `void loadPrecomputed(const uint8_t* srcValue, const uint8_t* srcBfi, const uint8_t* srcFloor, const uint16_t* srcOutputQ16, uint8_t numChannels = 4, uint16_t srcLutSize = 0)` |  |
 | method | `uint16_t lutSize() const` |  |
 | method | `PhaseMode phaseMode() const` |  |
-| method | `void precompute(SolverFn fn)` |  |
+| method | `void precompute(SolverFn fn, uint8_t numChannels = 4)` |  |
 | method | `void renderBFI_RGB(const uint8_t* upperFrame, const uint8_t* floorFrame, const uint8_t* bfiMapG, const uint8_t* bfiMapR, const uint8_t* bfiMapB, uint8_t* displayBuffer, uint16_t pixelCount) const` |  |
 | method | `void renderBFI_RGBW(const uint8_t* upperFrame, const uint8_t* floorFrame, const uint8_t* bfiMapG, const uint8_t* bfiMapR, const uint8_t* bfiMapB, const uint8_t* bfiMapW, uint8_t* displayBuffer, uint16_t pixelCount) const` |  |
 | method | `void renderBFI_RGBW_Packed(const uint8_t* upperFrame, const uint8_t* floorFrame, const uint8_t* packedBfiMap, uint8_t* displayBuffer, uint16_t pixelCount) const` |  |
@@ -217,6 +218,7 @@
 |------|-----------|-------------|
 | constant | `static constexpr uint8_t PHASE_EMIT_MASK` |  |
 | constant | `static constexpr uint8_t SOLVER_FIXED_BFI_LEVELS` |  |
+| constant | `static constexpr uint16_t SOLVER_LUT_SIZE` |  |
 | constant | `static constexpr uint16_t SOLVER_LUT_SIZE` |  |
 | inline function | `bool channelOnThisTick(uint8_t bfi, uint32_t tick, uint8_t cycleLen)` |  |
 | inline function | `size_t solverLutIndexFromQ16(uint16_t q16, uint16_t lutSize)` |  |

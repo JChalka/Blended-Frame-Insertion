@@ -330,7 +330,7 @@ public:
 
     void loadPrecomputed(const uint8_t* srcValue, const uint8_t* srcBfi,
                          const uint8_t* srcFloor, const uint16_t* srcOutputQ16,
-                         uint8_t numChannels = 4);
+                         uint8_t numChannels = 4, uint16_t srcLutSize = 0);
 
     // ----- Configuration -----
 

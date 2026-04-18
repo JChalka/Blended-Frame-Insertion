@@ -43,9 +43,13 @@ void SolverRuntime::precompute(SolverFn fn, uint8_t numChannels)
 
 void SolverRuntime::loadPrecomputed(const uint8_t* srcValue, const uint8_t* srcBfi,
                                     const uint8_t* srcFloor, const uint16_t* srcOutputQ16,
-                                    uint8_t numChannels)
+                                    uint8_t numChannels, uint16_t srcLutSize)
 {
     if (!m_valueLUT || !m_bfiLUT || m_lutSize < 2u) return;
+    // If srcLutSize provided, verify it matches m_lutSize to prevent stride mismatch
+    // (each channel is srcLutSize entries wide in the source; copying with wrong stride
+    //  reads across channel boundaries and corrupts all channel data).
+    if (srcLutSize != 0 && srcLutSize != m_lutSize) return;
     const size_t totalEntries = (size_t)numChannels * (size_t)m_lutSize;
 
     memcpy(m_valueLUT, srcValue, totalEntries);

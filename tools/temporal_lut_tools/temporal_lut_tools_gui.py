@@ -137,6 +137,7 @@ class App:
             value=cfg.get("precomputed_solver_out", str((self.default_export_dir / "solver_precomputed_luts.h").resolve()))
         )
         self.precomputed_solver_lut_size_var = tk.IntVar(value=int(cfg.get("precomputed_solver_lut_size", 0)))
+        self.precomputed_solver_channels_var = tk.StringVar(value=cfg.get("precomputed_solver_channels", "rgbw"))
         self.summary_text = tk.StringVar(value="No LUT build run yet.")
         self.refresh_status_var = tk.StringVar(value="Preview idle.")
         self.refresh_progress_var = tk.DoubleVar(value=0.0)
@@ -278,6 +279,7 @@ class App:
             "precomputed_calibration_header": self.precomputed_calibration_header_var.get(),
             "precomputed_solver_out": self.precomputed_solver_out_var.get(),
             "precomputed_solver_lut_size": self.precomputed_solver_lut_size_var.get(),
+            "precomputed_solver_channels": self.precomputed_solver_channels_var.get(),
             "preview_channel": self.preview_channel_var.get(),
             "calmeasure_dir": self.calmeasure_dir_var.get(),
             "true16_calmeasure_dir": self.true16_calmeasure_dir_var.get(),
@@ -462,6 +464,8 @@ class App:
         ttk.Label(row3d, text="Solver LUT size (0=auto)").pack(side="left")
         ttk.Combobox(row3d, textvariable=self.precomputed_solver_lut_size_var, values=HIGH_RES_EXPORT_SIZE_OPTIONS, state="readonly", width=8).pack(side="left", padx=6)
         ttk.Label(row3d, text="Derived mode follows solver ladder counts.").pack(side="left", padx=(12, 0))
+        ttk.Label(row3d, text="Channels").pack(side="left", padx=(16, 0))
+        ttk.Combobox(row3d, textvariable=self.precomputed_solver_channels_var, values=["rgbw", "rgb", "G", "R", "B", "W"], state="readonly", width=6).pack(side="left", padx=6)
 
         row3e = ttk.Frame(frame); row3e.pack(fill="x", padx=8, pady=(0,8))
         ttk.Label(row3e, text="Precomputed solver LUT header").pack(side="left")
@@ -3049,6 +3053,7 @@ class App:
             "--max-bfi", str(max_bfi),
             "--solver-fixed-bfi-levels", str(fixed_levels),
             "--solver-lut-size", str(self.precomputed_solver_lut_size_var.get()),
+            "--channels", str(self.precomputed_solver_channels_var.get()),
         ]
         self.run_subprocess(
             args,

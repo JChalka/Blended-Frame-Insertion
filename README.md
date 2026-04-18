@@ -152,8 +152,8 @@ void loop() {
 | Method | Description |
 |--------|-------------|
 | `attachLUTs(value, bfi, floor, outputQ16, size)` | Attach pre-allocated LUT buffers (4 channels × size) |
-| `precompute(solverFn)` | Populate LUTs by solving all Q16 values across GRBW channels |
-| `loadPrecomputed(srcValue, srcBfi, srcFloor, srcOutputQ16)` | Load LUTs from PROGMEM or pre-built data |
+| `precompute(solverFn, numChannels=4)` | Populate LUTs by solving all Q16 values across channels (default 4 = GRBW) |
+| `loadPrecomputed(srcValue, srcBfi, srcFloor, srcOutputQ16, numChannels=4, srcLutSize=0)` | Load LUTs from PROGMEM or pre-built data; validates srcLutSize against attached buffer size when non-zero |
 | `solve(q16, channel)` | Look up precomputed `EncodedState` for a Q16 input |
 | `config()` | Access `PolicyConfig` tuning knobs |
 | `setTransferCurve(r, g, b, w, buckets)` | Register per-channel transfer curves |
@@ -253,6 +253,7 @@ Binary cube format: `[uint16 gridSize LE][uint16 channels LE][N³ × C × uint16
 | [HyperTeensy_Temporal_Blend](examples/HyperTeensy_Temporal_Blend/) | Full production sketch — ObjectFLED parallel output, RawHID+Serial USB, independent solver/calibration headers. | ObjectFLED |
 | [Teensy_Temporal_Calibration](examples/Teensy_Temporal_Calibration/) | Calibration capture sketch — drives LED states for host-side colorimetric measurement via serial protocol. | ObjectFLED |
 | [ESP32S3_DoubleBuffer](examples/ESP32S3_DoubleBuffer/) | Double-buffered BFI rendering on ESP32-S3. Core 0 solves 16-bit color to BFI frames, core 1 swaps pointers (zero-copy) and drives sub-frame phases via FastLED. PSRAM-backed buffers, animated rainbow pattern. | FastLED |
+| [LoadPrecomputedDemo](examples/LoadPrecomputedDemo/) | Loads solver LUTs from an offline-generated PROGMEM header — no solver or ladder data compiled in. Demonstrates `TEMPORAL_BFI_PRECOMPUTED_ONLY` mode. | Library only |
 
 ### Build Status
 

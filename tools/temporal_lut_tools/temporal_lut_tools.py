@@ -1266,7 +1266,17 @@ def _progress(msg: str):
     print(msg, file=sys.stderr, flush=True)
 
 
-def _build_solver_precomputed_tables(runtime_ladders, calibration, policy, solver_fixed_bfi_levels: int, solver_lut_size: int | None = None):
+def _build_solver_precomputed_tables(runtime_ladders, calibration, policy, solver_fixed_bfi_levels: int, solver_lut_size: int | None = None, include_output_q16: bool = False, include_fixed_bfi: bool = False, channel_indices: list[int] | None = None):
+    """Build precomputed solver tables for the given channel indices.
+
+    ``channel_indices`` selects which solver-order channels (0=G,1=R,2=B,3=W)
+    to compute.  Defaults to [0,1,2,3] (GRBW).  The returned tables contain
+    only the requested channels in the order given.
+    """
+    if channel_indices is None:
+        channel_indices = list(range(4))
+    num_ch = len(channel_indices)
+
     fixed_levels = int(solver_fixed_bfi_levels)
     if fixed_levels < 1:
         raise ValueError("solver_fixed_bfi_levels must be >= 1")
@@ -1288,38 +1298,53 @@ def _build_solver_precomputed_tables(runtime_ladders, calibration, policy, solve
         prepared_entries.append(entries)
         prepared_entries_by_bfi.append(by_bfi)
 
-    solver_value_lut = [[0] * resolved_solver_lut_size for _ in range(4)]
-    solver_floor_value_lut = [[0] * resolved_solver_lut_size for _ in range(4)]
-    solver_bfi_lut = [[0] * resolved_solver_lut_size for _ in range(4)]
-    solver_output_q16_lut = [[0] * resolved_solver_lut_size for _ in range(4)]
+    solver_value_lut = [[0] * resolved_solver_lut_size for _ in range(num_ch)]
+    solver_floor_value_lut = [[0] * resolved_solver_lut_size for _ in range(num_ch)]
+    solver_bfi_lut = [[0] * resolved_solver_lut_size for _ in range(num_ch)]
+    solver_output_q16_lut = [[0] * resolved_solver_lut_size for _ in range(num_ch)] if (include_output_q16 or include_fixed_bfi) else None
 
-    _progress(f"Building primary solver LUTs ({resolved_solver_lut_size} entries x 4 channels)...")
-    for ch in range(4):
+    ch_labels = [SOLVER_CHANNEL_ORDER[ci] for ci in channel_indices]
+    _progress(f"Building primary solver LUTs ({resolved_solver_lut_size} entries x {num_ch} channels [{','.join(ch_labels)}])...")
+    for out_idx, src_ch in enumerate(channel_indices):
         for i in range(resolved_solver_lut_size):
             q16 = (int(i) * 65535) // int(resolved_solver_lut_size - 1)
             state = _encode_state_from16(
                 q16,
-                prepared_entries[ch],
+                prepared_entries[src_ch],
                 policy,
                 calibration,
-                solver_channel=ch,
+                solver_channel=src_ch,
             )
-            solver_value_lut[ch][i] = int(state["value"])
-            solver_floor_value_lut[ch][i] = int(state.get("lower_value", state["value"]))
-            solver_bfi_lut[ch][i] = int(state["bfi"])
-            solver_output_q16_lut[ch][i] = int(state["output_q16"])
-        solver_value_lut[ch][0] = 0
-        solver_floor_value_lut[ch][0] = 0
-        solver_bfi_lut[ch][0] = 0
-        _progress(f"  channel {ch}/3 ({SOLVER_CHANNEL_ORDER[ch]}) primary done")
+            solver_value_lut[out_idx][i] = int(state["value"])
+            solver_floor_value_lut[out_idx][i] = int(state.get("lower_value", state["value"]))
+            solver_bfi_lut[out_idx][i] = int(state["bfi"])
+            if solver_output_q16_lut is not None:
+                solver_output_q16_lut[out_idx][i] = int(state["output_q16"])
+        solver_value_lut[out_idx][0] = 0
+        solver_floor_value_lut[out_idx][0] = 0
+        solver_bfi_lut[out_idx][0] = 0
+        _progress(f"  channel {out_idx}/{num_ch - 1} ({SOLVER_CHANNEL_ORDER[src_ch]}) primary done")
 
-    _progress(f"Building per-BFI resolved LUTs ({fixed_levels} levels x {resolved_solver_lut_size} entries x 4 channels)...")
-    solver_resolved_value_lut = [[[0] * resolved_solver_lut_size for _ in range(fixed_levels)] for _ in range(4)]
-    solver_resolved_bfi_lut = [[[0] * resolved_solver_lut_size for _ in range(fixed_levels)] for _ in range(4)]
+    if not include_fixed_bfi:
+        _progress("Skipping per-BFI resolved & dither LUTs (use --include-fixed-bfi to emit them).")
+        _progress("All solver precomputed tables built.")
+        result = {
+            "solverLUTSize": int(resolved_solver_lut_size),
+            "solverBFILUT": solver_bfi_lut,
+            "solverValueLUT": solver_value_lut,
+            "solverValueFloorLUT": solver_floor_value_lut,
+        }
+        if solver_output_q16_lut is not None:
+            result["solverOutputQ16LUT"] = solver_output_q16_lut
+        return result
 
-    solver_lower_floor_value_lut = [[[0] * resolved_solver_lut_size for _ in range(fixed_levels)] for _ in range(4)]
+    _progress(f"Building per-BFI resolved LUTs ({fixed_levels} levels x {resolved_solver_lut_size} entries x {num_ch} channels)...")
+    solver_resolved_value_lut = [[[0] * resolved_solver_lut_size for _ in range(fixed_levels)] for _ in range(num_ch)]
+    solver_resolved_bfi_lut = [[[0] * resolved_solver_lut_size for _ in range(fixed_levels)] for _ in range(num_ch)]
 
-    for ch in range(4):
+    solver_lower_floor_value_lut = [[[0] * resolved_solver_lut_size for _ in range(fixed_levels)] for _ in range(num_ch)]
+
+    for out_idx, src_ch in enumerate(channel_indices):
         for fixed_bfi in range(fixed_levels):
             constraints = {
                 "min_bfi": int(fixed_bfi),
@@ -1328,56 +1353,56 @@ def _build_solver_precomputed_tables(runtime_ladders, calibration, policy, solve
                 "target_scale_q16": 65535,
                 "max_target_q16": 65535,
             }
-            constrained_entries = prepared_entries_by_bfi[ch].get(int(fixed_bfi), None)
+            constrained_entries = prepared_entries_by_bfi[src_ch].get(int(fixed_bfi), None)
             for i in range(resolved_solver_lut_size):
-                target_q16 = int(solver_output_q16_lut[ch][i])
+                target_q16 = int(solver_output_q16_lut[out_idx][i])
                 state = _encode_state_from16_constrained(
                     target_q16,
-                    prepared_entries[ch],
+                    prepared_entries[src_ch],
                     policy,
                     constraints,
                     calibration,
-                    solver_channel=ch,
+                    solver_channel=src_ch,
                     constrained_entries=constrained_entries,
                 )
-                solver_resolved_value_lut[ch][fixed_bfi][i] = int(state["value"])
-                solver_resolved_bfi_lut[ch][fixed_bfi][i] = int(state["bfi"])
-                solver_lower_floor_value_lut[ch][fixed_bfi][i] = int(state.get("lower_value", state["value"]))
-        _progress(f"  channel {ch}/3 ({SOLVER_CHANNEL_ORDER[ch]}) resolved done")
+                solver_resolved_value_lut[out_idx][fixed_bfi][i] = int(state["value"])
+                solver_resolved_bfi_lut[out_idx][fixed_bfi][i] = int(state["bfi"])
+                solver_lower_floor_value_lut[out_idx][fixed_bfi][i] = int(state.get("lower_value", state["value"]))
+        _progress(f"  channel {out_idx}/{num_ch - 1} ({SOLVER_CHANNEL_ORDER[src_ch]}) resolved done")
 
-    _progress(f"Building dither LUTs ({fixed_levels} levels x {resolved_solver_lut_size} entries x 4 channels)...")
-    solver_legal_output_q16_for_value_bfi = [[[0] * 256 for _ in range(fixed_levels)] for _ in range(4)]
+    _progress(f"Building dither LUTs ({fixed_levels} levels x {resolved_solver_lut_size} entries x {num_ch} channels)...")
+    solver_legal_output_q16_for_value_bfi = [[[0] * 256 for _ in range(fixed_levels)] for _ in range(num_ch)]
 
-    for ch in range(4):
-        ladder = runtime_ladders[ch]
+    for out_idx, src_ch in enumerate(channel_indices):
+        ladder = runtime_ladders[src_ch]
         for e in ladder:
             bfi = int(e["bfi"])
             if bfi >= fixed_levels:
                 continue
-            solver_legal_output_q16_for_value_bfi[ch][bfi][int(e["value"])] = int(e["output_q16"])
+            solver_legal_output_q16_for_value_bfi[out_idx][bfi][int(e["value"])] = int(e["output_q16"])
 
-    solver_dither_lower_value_lut = [[[0] * resolved_solver_lut_size for _ in range(fixed_levels)] for _ in range(4)]
-    solver_dither_upper_value_lut = [[[0] * resolved_solver_lut_size for _ in range(fixed_levels)] for _ in range(4)]
-    solver_dither_upper_blend8_lut = [[[0] * resolved_solver_lut_size for _ in range(fixed_levels)] for _ in range(4)]
+    solver_dither_lower_value_lut = [[[0] * resolved_solver_lut_size for _ in range(fixed_levels)] for _ in range(num_ch)]
+    solver_dither_upper_value_lut = [[[0] * resolved_solver_lut_size for _ in range(fixed_levels)] for _ in range(num_ch)]
+    solver_dither_upper_blend8_lut = [[[0] * resolved_solver_lut_size for _ in range(fixed_levels)] for _ in range(num_ch)]
 
-    for ch in range(4):
+    for out_idx, src_ch in enumerate(channel_indices):
         for fixed_bfi in range(fixed_levels):
-            solver_legal_output_q16_for_value_bfi[ch][fixed_bfi][0] = 0
+            solver_legal_output_q16_for_value_bfi[out_idx][fixed_bfi][0] = 0
 
             for i in range(resolved_solver_lut_size):
-                target_q16 = int(solver_output_q16_lut[ch][i])
-                resolved_value = int(solver_resolved_value_lut[ch][fixed_bfi][i])
+                target_q16 = int(solver_output_q16_lut[out_idx][i])
+                resolved_value = int(solver_resolved_value_lut[out_idx][fixed_bfi][i])
 
                 lower_value = int(resolved_value)
                 upper_value = int(resolved_value)
-                lower_q16 = int(solver_legal_output_q16_for_value_bfi[ch][fixed_bfi][resolved_value])
+                lower_q16 = int(solver_legal_output_q16_for_value_bfi[out_idx][fixed_bfi][resolved_value])
                 upper_q16 = int(lower_q16)
 
                 have_lower = (resolved_value == 0) or (lower_q16 != 0)
                 have_upper = bool(have_lower)
 
                 for candidate_value in range(256):
-                    candidate_q16 = int(solver_legal_output_q16_for_value_bfi[ch][fixed_bfi][candidate_value])
+                    candidate_q16 = int(solver_legal_output_q16_for_value_bfi[out_idx][fixed_bfi][candidate_value])
                     if candidate_value != 0 and candidate_q16 == 0:
                         continue
 
@@ -1421,18 +1446,17 @@ def _build_solver_precomputed_tables(runtime_ladders, calibration, policy, solve
                 elif upper_value != lower_value and target_q16 >= upper_q16:
                     blend8 = 255
 
-                solver_dither_lower_value_lut[ch][fixed_bfi][i] = int(lower_value)
-                solver_dither_upper_value_lut[ch][fixed_bfi][i] = int(upper_value)
-                solver_dither_upper_blend8_lut[ch][fixed_bfi][i] = int(max(0, min(255, blend8)))
-        _progress(f"  channel {ch}/3 ({SOLVER_CHANNEL_ORDER[ch]}) dither done")
+                solver_dither_lower_value_lut[out_idx][fixed_bfi][i] = int(lower_value)
+                solver_dither_upper_value_lut[out_idx][fixed_bfi][i] = int(upper_value)
+                solver_dither_upper_blend8_lut[out_idx][fixed_bfi][i] = int(max(0, min(255, blend8)))
+        _progress(f"  channel {out_idx}/{num_ch - 1} ({SOLVER_CHANNEL_ORDER[src_ch]}) dither done")
 
     _progress("All solver precomputed tables built.")
-    return {
+    result = {
         "solverLUTSize": int(resolved_solver_lut_size),
         "solverBFILUT": solver_bfi_lut,
         "solverValueLUT": solver_value_lut,
         "solverValueFloorLUT": solver_floor_value_lut,
-        "solverOutputQ16LUT": solver_output_q16_lut,
         "solverResolvedValueForFixedBfiLUT": solver_resolved_value_lut,
         "solverResolvedBfiForFixedBfiLUT": solver_resolved_bfi_lut,
         "solverLowerFloorValueForFixedBfiLUT": solver_lower_floor_value_lut,
@@ -1440,14 +1464,18 @@ def _build_solver_precomputed_tables(runtime_ladders, calibration, policy, solve
         "solverDitherUpperValueForFixedBfiLUT": solver_dither_upper_value_lut,
         "solverDitherUpperBlend8ForFixedBfiLUT": solver_dither_upper_blend8_lut,
     }
+    if solver_output_q16_lut is not None:
+        result["solverOutputQ16LUT"] = solver_output_q16_lut
+    return result
 
 
 def _append_cpp_u8_2d(lines, name, table):
+    num_ch = len(table)
     width = len(table[0]) if table else 0
     if width < 1 or any(len(row) != width for row in table):
         raise ValueError(f"{name} must be a rectangular 2D table")
-    lines.append(f"static const uint8_t {name}[4][{width}] PROGMEM = {{")
-    for ch in range(4):
+    lines.append(f"static const uint8_t {name}[{num_ch}][{width}] PROGMEM = {{")
+    for ch in range(num_ch):
         lines.append("  {")
         for i in range(0, width, 16):
             chunk = table[ch][i:i+16]
@@ -1458,11 +1486,12 @@ def _append_cpp_u8_2d(lines, name, table):
 
 
 def _append_cpp_u16_2d(lines, name, table):
+    num_ch = len(table)
     width = len(table[0]) if table else 0
     if width < 1 or any(len(row) != width for row in table):
         raise ValueError(f"{name} must be a rectangular 2D table")
-    lines.append(f"static const uint16_t {name}[4][{width}] PROGMEM = {{")
-    for ch in range(4):
+    lines.append(f"static const uint16_t {name}[{num_ch}][{width}] PROGMEM = {{")
+    for ch in range(num_ch):
         lines.append("  {")
         for i in range(0, width, 12):
             chunk = table[ch][i:i+12]
@@ -1473,6 +1502,7 @@ def _append_cpp_u16_2d(lines, name, table):
 
 
 def _append_cpp_u8_3d(lines, name, table, fixed_levels):
+    num_ch = len(table)
     width = len(table[0][0]) if table and table[0] else 0
     if width < 1:
         raise ValueError(f"{name} must contain at least one LUT entry")
@@ -1480,8 +1510,8 @@ def _append_cpp_u8_3d(lines, name, table, fixed_levels):
         raise ValueError(f"{name} fixed-level depth mismatch")
     if any(len(level_table) != width for channel_table in table for level_table in channel_table):
         raise ValueError(f"{name} must be a rectangular 3D table")
-    lines.append(f"static const uint8_t {name}[4][{int(fixed_levels)}][{width}] PROGMEM = {{")
-    for ch in range(4):
+    lines.append(f"static const uint8_t {name}[{num_ch}][{int(fixed_levels)}][{width}] PROGMEM = {{")
+    for ch in range(num_ch):
         lines.append("  {")
         for bfi in range(int(fixed_levels)):
             lines.append("    {")
@@ -1510,10 +1540,30 @@ def export_precomputed_solver_luts_header(
     prefer_higher_bfi: bool = False,
     preferred_min_bfi: int = 0,
     highlight_bypass_start: int = 255,
+    include_output_q16: bool = False,
+    include_fixed_bfi: bool = False,
+    channels: str = "rgbw",
 ):
     _progress(f"Loading solver header: {solver_header}")
     runtime = _load_runtime_solver_ladders(solver_header)
     solver_header_max_bfi = int(runtime["max_bfi"])
+
+    # --- resolve channel selection ---
+    _CHANNEL_LETTER_TO_SOLVER_INDEX = {"G": 0, "R": 1, "B": 2, "W": 3}
+    channels_upper = channels.upper().strip()
+    if channels_upper == "RGBW":
+        channel_indices = [0, 1, 2, 3]  # G, R, B, W in solver order
+    elif channels_upper == "RGB":
+        channel_indices = [0, 1, 2]      # G, R, B
+    elif len(channels_upper) == 1 and channels_upper in _CHANNEL_LETTER_TO_SOLVER_INDEX:
+        channel_indices = [_CHANNEL_LETTER_TO_SOLVER_INDEX[channels_upper]]
+    else:
+        raise ValueError(
+            f"Invalid channels='{channels}'. Use 'rgbw' (default), 'rgb', or a single letter (G/R/B/W)."
+        )
+    num_ch = len(channel_indices)
+    ch_labels = [SOLVER_CHANNEL_ORDER[ci] for ci in channel_indices]
+    _progress(f"Channel mode: {channels_upper} -> {num_ch} channel(s) [{', '.join(ch_labels)}]")
 
     if max_bfi is None:
         effective_max_bfi = int(solver_header_max_bfi)
@@ -1556,32 +1606,36 @@ def export_precomputed_solver_luts_header(
     else:
         effective_solver_lut_size = int(solver_lut_size)
         if effective_solver_lut_size < int(derived_solver_lut_size):
-            raise ValueError(
-                f"solver_lut_size={effective_solver_lut_size} is smaller than derived ladder count {derived_solver_lut_size}"
-            )
+            _progress(f"NOTE: solver_lut_size={effective_solver_lut_size} is smaller than derived ladder count {derived_solver_lut_size}; the LUT will uniformly downsample the q16 range.")
 
-    _progress(f"Building precomputed tables (LUT size={effective_solver_lut_size}, fixed_levels={fixed_levels}, max_bfi={effective_max_bfi})...")
+    _progress(f"Building precomputed tables (LUT size={effective_solver_lut_size}, fixed_levels={fixed_levels}, max_bfi={effective_max_bfi}, channels={channels_upper})...")
     tables = _build_solver_precomputed_tables(
         runtime_ladders=runtime["ladders"],
         calibration=calibration,
         policy=policy,
         solver_fixed_bfi_levels=fixed_levels,
         solver_lut_size=effective_solver_lut_size,
+        include_output_q16=include_output_q16,
+        include_fixed_bfi=include_fixed_bfi,
+        channel_indices=channel_indices,
     )
 
+    ch_comment = ", ".join(f"{i}={SOLVER_CHANNEL_ORDER[ci]}" for i, ci in enumerate(channel_indices))
     _progress(f"Emitting C++ header arrays...")
     lines = [
         "// Auto-generated precomputed solver LUT header (v15)",
-        "// Channel index order matches solver runtime: 0=G, 1=R, 2=B, 3=W",
+        f"// Channel index order: {ch_comment}",
         f"// Calibration mode: {calibration_mode}",
         "#pragma once",
         "#include <Arduino.h>",
         "#define TEMPORAL_BFI_PRECOMPUTED_HAS_LUT_SIZE 1",
         "#define TEMPORAL_BFI_PRECOMPUTED_HAS_FLOOR_LUT 1",
+        f"#define TEMPORAL_BFI_PRECOMPUTED_NUM_CHANNELS {num_ch}",
         "",
         "namespace TemporalBFIPrecomputedSolverLUTs {",
         f"static constexpr uint8_t MAX_BFI = {effective_max_bfi};",
         f"static constexpr uint8_t SOLVER_FIXED_BFI_LEVELS = {fixed_levels};",
+        f"static constexpr uint8_t NUM_CHANNELS = {num_ch};",
         f"static constexpr uint32_t SOLVER_LUT_SIZE = {int(tables['solverLUTSize'])};",
         "",
     ]
@@ -1589,43 +1643,45 @@ def export_precomputed_solver_luts_header(
     _append_cpp_u8_2d(lines, "solverBFILUT", tables["solverBFILUT"])
     _append_cpp_u8_2d(lines, "solverValueLUT", tables["solverValueLUT"])
     _append_cpp_u8_2d(lines, "solverValueFloorLUT", tables["solverValueFloorLUT"])
-    _append_cpp_u16_2d(lines, "solverOutputQ16LUT", tables["solverOutputQ16LUT"])
-    _append_cpp_u8_3d(
-        lines,
-        "solverResolvedValueForFixedBfiLUT",
-        tables["solverResolvedValueForFixedBfiLUT"],
-        fixed_levels,
-    )
-    _append_cpp_u8_3d(
-        lines,
-        "solverResolvedBfiForFixedBfiLUT",
-        tables["solverResolvedBfiForFixedBfiLUT"],
-        fixed_levels,
-    )
-    _append_cpp_u8_3d(
-        lines,
-        "solverLowerFloorValueForFixedBfiLUT",
-        tables["solverLowerFloorValueForFixedBfiLUT"],
-        fixed_levels,
-    )
-    _append_cpp_u8_3d(
-        lines,
-        "solverDitherLowerValueForFixedBfiLUT",
-        tables["solverDitherLowerValueForFixedBfiLUT"],
-        fixed_levels,
-    )
-    _append_cpp_u8_3d(
-        lines,
-        "solverDitherUpperValueForFixedBfiLUT",
-        tables["solverDitherUpperValueForFixedBfiLUT"],
-        fixed_levels,
-    )
-    _append_cpp_u8_3d(
-        lines,
-        "solverDitherUpperBlend8ForFixedBfiLUT",
-        tables["solverDitherUpperBlend8ForFixedBfiLUT"],
-        fixed_levels,
-    )
+    if "solverOutputQ16LUT" in tables:
+        _append_cpp_u16_2d(lines, "solverOutputQ16LUT", tables["solverOutputQ16LUT"])
+    if "solverResolvedValueForFixedBfiLUT" in tables:
+        _append_cpp_u8_3d(
+            lines,
+            "solverResolvedValueForFixedBfiLUT",
+            tables["solverResolvedValueForFixedBfiLUT"],
+            fixed_levels,
+        )
+        _append_cpp_u8_3d(
+            lines,
+            "solverResolvedBfiForFixedBfiLUT",
+            tables["solverResolvedBfiForFixedBfiLUT"],
+            fixed_levels,
+        )
+        _append_cpp_u8_3d(
+            lines,
+            "solverLowerFloorValueForFixedBfiLUT",
+            tables["solverLowerFloorValueForFixedBfiLUT"],
+            fixed_levels,
+        )
+        _append_cpp_u8_3d(
+            lines,
+            "solverDitherLowerValueForFixedBfiLUT",
+            tables["solverDitherLowerValueForFixedBfiLUT"],
+            fixed_levels,
+        )
+        _append_cpp_u8_3d(
+            lines,
+            "solverDitherUpperValueForFixedBfiLUT",
+            tables["solverDitherUpperValueForFixedBfiLUT"],
+            fixed_levels,
+        )
+        _append_cpp_u8_3d(
+            lines,
+            "solverDitherUpperBlend8ForFixedBfiLUT",
+            tables["solverDitherUpperBlend8ForFixedBfiLUT"],
+            fixed_levels,
+        )
 
     lines.append("} // namespace TemporalBFIPrecomputedSolverLUTs")
     lines.append("")
@@ -1644,6 +1700,8 @@ def export_precomputed_solver_luts_header(
         "derived_solver_lut_size": int(derived_solver_lut_size),
         "policy": policy,
         "calibration_mode": calibration_mode,
+        "channels": channels_upper,
+        "num_channels": num_ch,
     }
 
 def _active_channels(r, g, b, w):
@@ -7328,6 +7386,9 @@ def main():
     ap_export_solver_precomputed.add_argument("--prefer-higher-bfi", action="store_true")
     ap_export_solver_precomputed.add_argument("--preferred-min-bfi", type=int, default=0)
     ap_export_solver_precomputed.add_argument("--highlight-bypass-start", type=int, default=255)
+    ap_export_solver_precomputed.add_argument("--include-output-q16", action="store_true", help="Include solverOutputQ16LUT (uint16, not needed by most sketches)")
+    ap_export_solver_precomputed.add_argument("--include-fixed-bfi", action="store_true", help="Include per-BFI resolved and dither 3D LUTs (very large, not used by library runtime)")
+    ap_export_solver_precomputed.add_argument("--channels", type=str, default="rgbw", help="Channel mode: 'rgbw' (default, 4ch), 'rgb' (3ch), or a single letter G/R/B/W (1ch)")
 
     ap_patch = sub.add_parser("patch-plan")
     ap_patch.add_argument("--preset", choices=sorted(PATCH_PRESETS.keys()), required=True)
@@ -7680,6 +7741,9 @@ def main():
             prefer_higher_bfi=args.prefer_higher_bfi,
             preferred_min_bfi=args.preferred_min_bfi,
             highlight_bypass_start=args.highlight_bypass_start,
+            include_output_q16=args.include_output_q16,
+            include_fixed_bfi=args.include_fixed_bfi,
+            channels=args.channels,
         )
         print(json.dumps({"ok": True, **result}, indent=2))
     elif args.cmd == "patch-plan":
