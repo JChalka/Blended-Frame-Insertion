@@ -16,6 +16,7 @@ static constexpr uint16_t LED_COUNT = 16;
 static constexpr uint8_t  CYCLE_LEN = 5;
 static constexpr uint8_t  DATA_PIN  = 2;
 static constexpr uint16_t LUT_SIZE  = TemporalBFIRuntime::SOLVER_LUT_SIZE;
+static constexpr uint32_t MIN_SHOW_INTERVAL_US = 1600u;  // 625 FPS max
 
 // Solver LUTs.
 static uint8_t solverValueLUT[4 * LUT_SIZE];
@@ -94,8 +95,16 @@ void setup() {
 }
 
 void loop() {
+    static uint32_t lastShowUs = (uint32_t)micros();
+    uint32_t nowUs = (uint32_t)micros();
+    if ((uint32_t)(nowUs - lastShowUs) < MIN_SHOW_INTERVAL_US) {
+        yield();
+        return;
+    }
+
     renderToCRGB(leds, LED_COUNT, phase);
     FastLED.show();
+    lastShowUs = (uint32_t)micros();
 
     phase = (phase + 1) % CYCLE_LEN;
 }

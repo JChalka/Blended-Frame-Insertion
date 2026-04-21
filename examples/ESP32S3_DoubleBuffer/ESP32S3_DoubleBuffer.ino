@@ -19,6 +19,10 @@
 #include <FastLED.h>
 #include <TemporalBFI.h>
 #include <TemporalBFIRuntime.h>
+#include <esp_task_wdt.h>
+#include <esp_heap_caps.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 using namespace TemporalBFI;
 
@@ -85,6 +89,10 @@ static uint16_t srcR[LED_COUNT];
 static uint16_t srcG[LED_COUNT];
 static uint16_t srcB[LED_COUNT];
 
+// Display pacing + telemetry.
+static constexpr uint32_t MIN_SHOW_INTERVAL_US = 1600u;   // 625 FPS max (allows jitter headroom)
+static constexpr uint32_t FPS_REPORT_INTERVAL_US = 2000000u;
+
 // ---------------------------------------------------------------------------
 // Pattern — simple animated rainbow in 16-bit Q16 space
 // ---------------------------------------------------------------------------
@@ -139,7 +147,12 @@ static void solveAndCommitAll() {
 // Each iteration: generate pattern → solve → signal display → wait for swap.
 // ---------------------------------------------------------------------------
 static void solveTask(void* pvParameters) {
+    // Subscribe solve task to TWDT and feed it explicitly in the tight loop.
+    esp_task_wdt_add(NULL);
+
     for (;;) {
+        esp_task_wdt_reset();
+
         uint32_t tStart = micros();
 
         generatePattern();
@@ -252,16 +265,74 @@ void setup() {
 // buffer pointers are swapped (zero-copy) and the solve task is woken.
 // ---------------------------------------------------------------------------
 void loop() {
+    static uint32_t lastShowUs = (uint32_t)micros();
+    static uint32_t fpsFrameCount = 0;
+    static uint32_t fpsSwapCount = 0;
+    static uint32_t fpsMaxFrameUs = 0;
+    static uint32_t fpsMinFrameUs = UINT32_MAX;
+    static uint32_t fpsLastReportUs = (uint32_t)micros();
+    static uint32_t frameStartUs = (uint32_t)micros();
+
+    frameStartUs = (uint32_t)micros();
+
+    // Unsigned subtraction keeps this rollover-safe when micros() wraps.
+    uint32_t elapsedSinceShowUs = (uint32_t)(frameStartUs - lastShowUs);
+    if (elapsedSinceShowUs < MIN_SHOW_INTERVAL_US) {
+        vTaskDelay(1);
+        return;
+    }
+
+    bool didSwap = false;
+
     // --- Check for new solve data ---
     if (solveReady) {
         swapBuffers();
         solveReady = false;
+        didSwap = true;
         xTaskNotifyGive(solveTaskHandle);  // wake solve task for next frame
     }
 
     // --- Render current BFI phase ---
     renderPhase(bframe);
     FastLED.show();
+    lastShowUs = (uint32_t)micros();
 
     bframe = (bframe + 1) % CYCLE_LEN;
+
+    uint32_t frameEndUs = (uint32_t)micros();
+    uint32_t frameDeltaUs = (uint32_t)(frameEndUs - frameStartUs);
+
+    ++fpsFrameCount;
+    if (didSwap) {
+        ++fpsSwapCount;
+    }
+    if (frameDeltaUs > fpsMaxFrameUs) {
+        fpsMaxFrameUs = frameDeltaUs;
+    }
+    if (frameDeltaUs < fpsMinFrameUs) {
+        fpsMinFrameUs = frameDeltaUs;
+    }
+
+    uint32_t elapsedReportUs = (uint32_t)(frameEndUs - fpsLastReportUs);
+    if (elapsedReportUs >= FPS_REPORT_INTERVAL_US && fpsFrameCount > 0) {
+        float fps = (float)fpsFrameCount * 1000000.0f / (float)elapsedReportUs;
+        float frameMs = (float)elapsedReportUs / (float)fpsFrameCount / 1000.0f;
+        Serial.printf("FPS: %.1f (%.2f ms/frame) | min %.2f max %.2f ms | swaps %lu | %lu fr\n",
+                      fps,
+                      frameMs,
+                      (float)fpsMinFrameUs / 1000.0f,
+                      (float)fpsMaxFrameUs / 1000.0f,
+                      (unsigned long)fpsSwapCount,
+                      (unsigned long)fpsFrameCount);
+
+        fpsFrameCount = 0;
+        fpsSwapCount = 0;
+        fpsMaxFrameUs = 0;
+        fpsMinFrameUs = UINT32_MAX;
+        fpsLastReportUs = frameEndUs;
+    }
+
+    if (!didSwap) {
+        vTaskDelay(1);
+    }
 }

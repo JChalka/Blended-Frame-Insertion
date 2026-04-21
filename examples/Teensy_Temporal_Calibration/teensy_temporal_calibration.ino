@@ -17,6 +17,7 @@
 #define DEFAULT_BLEND_CYCLE 5
 #define TEMPORAL_BFI_CYCLE (MAX_BFI_FRAMES + 1)
 #define TEMPORAL_BLEND_CYCLE_MAX 60
+#define MIN_SHOW_INTERVAL_US 1600u  // 625 FPS max
 #define DIRECT_FRAME_MAGIC_0 'T'
 #define DIRECT_FRAME_MAGIC_1 'C'
 #define DIRECT_FRAME_MAGIC_2 'A'
@@ -432,9 +433,17 @@ void setup() {
 }
 
 void loop() {
+  static uint32_t lastShowUs = (uint32_t)micros();
+
   for (uint16_t budget = 0; budget < 96 && Serial.available(); budget++) {
     uint8_t input = (uint8_t)Serial.read();
     processFrameByte(input);
+  }
+
+  uint32_t nowUs = (uint32_t)micros();
+  if ((uint32_t)(nowUs - lastShowUs) < MIN_SHOW_INTERVAL_US) {
+    yield();
+    return;
   }
 
   if (!renderEnabled) {
@@ -444,6 +453,7 @@ void loop() {
   }
 
   leds.show();
+  lastShowUs = (uint32_t)micros();
 
   if (!manualPhaseMode) {
     temporalTick++;
