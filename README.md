@@ -104,7 +104,7 @@ The static `renderSubpixelBFI_*()` methods remain unchanged and always use Fixed
 - **Distributed phase scheduling** — per-BFI natural cycle (1 upper + N lowers) with automatic duty derivation; optional Bresenham-even global-cycle mode for advanced use; legacy FixedMask mode preserved as default
 - **FastLED integration** — works alongside FastLED CRGB buffers with GRB byte-order handling
 - **Platform-agnostic core** — runs on Teensy 4.x, ESP32, and any Arduino-compatible board with sufficient RAM
-- **Implicit phase timing on NeoPixel-class LEDs** — SK6812/WS2812 transmission time acts as a natural phase timer; faster SPI chipsets (APA102, SK9822, HD108, etc.) require explicit timing control (see [Rendering Model § 6.2](tools/README_RENDERING_MODEL.md))
+- **Implicit phase timing on NeoPixel-class LEDs** — SK6812/WS2812 transmission time acts as a natural phase timer; faster SPI chipsets (APA102, SK9822, HD108, etc.) require explicit timing control and show-cadence guards (see [Rendering Model § 6.2](tools/README_RENDERING_MODEL.md))
 
 ## Quick Start
 
@@ -337,6 +337,20 @@ Most demo environments target Teensy 4.0 at 816 MHz with LTO. The `HyperTeensy` 
 - **Recommended**: Teensy 4.0/4.1 (1 MB RAM, 600+ MHz ARM Cortex-M7) or ESP32-S3 (dual-core 240 MHz, PSRAM)
 - **Parallel output**: ObjectFLED (Teensy), FastLED (ESP32/Teensy), or I2SClocklessLedDriver (ESP32/S3)
 - **Target LED refresh rate**: ≥600 Hz (5 phases × ≥120 Hz perceived frame rate)
+
+### Timing Control Guidance
+
+Temporal BFI quality depends on keeping `show()` cadence inside a valid window.
+
+- **Calling `show()` too often** can break frame integrity on backends that do not block or guard re-entry while DMA/PIO output is still active. A second submission may overlap the previous transmission, causing partial writes and visible pixel flicker (often most obvious near strip tail/end LEDs).
+- **Calling `show()` too infrequently** lowers phase refresh, making the temporal cycle itself visible as flicker/stepping and reducing blend fidelity.
+
+In practice, use both:
+
+- a **minimum interval guard** (do not submit a new `show()` before the backend can finish one full frame + latch/reset), and
+- a **maximum interval target** (keep phase cadence high enough to preserve temporal integration; for a 5-phase cycle, usually maintain at least ~600 Hz phase refresh for ~120 Hz perceived output).
+
+Also align frame generation/ingestion with the target perceived refresh rate. For example, if the visual target is ~120 Hz, generating new pattern frames much faster than ~120 FPS typically provides no visible benefit and mostly consumes CPU time that could be used for solver, I/O, or system headroom.
 
 ## License
 

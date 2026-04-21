@@ -232,6 +232,22 @@ For SPI / high-speed LEDs (≥10 MHz), the data transfer is fast enough that the
 
 > **Phase timing note:** The current reference implementation relies on SK6812 transmission time (~800 kHz–1.12 MHz per bit) as an implicit phase timer — each `showLEDs()` call takes long enough that phases are naturally spaced at consistent intervals without explicit timing control. For faster LED chipsets (≥10 MHz SPI class such as APA102, SK9822, HD108, etc.), the transmission completes in a fraction of the time, and the phase cadence becomes dominated by loop jitter and computation variance. In these cases, **explicit phase timing** (e.g. a hardware timer interrupt or `delayMicroseconds()` guard) is required to ensure consistent inter-phase intervals. Without it, uneven phase spacing will cause visible flicker and incorrect temporal blend ratios.
 
+#### 6.2.1 Show Cadence Window (too fast vs too slow)
+
+Correct BFI rendering requires keeping `showLEDs()` calls within a valid cadence window:
+
+- **Too fast (over-submission):** If the LED backend returns before physical output has completed and does not enforce an internal in-flight lock, calling `showLEDs()` again can queue/overwrite while the prior frame is still shifting out. This can cause partial updates, frame tearing, and end-of-strip flicker.
+- **Too slow (under-submission):** If `showLEDs()` is delayed too long, phase refresh drops and the temporal blend cycle becomes visible. The observer sees shimmer/flicker/stepping because the eye is no longer integrating enough phase updates per perceived frame.
+
+A practical implementation should enforce both bounds:
+
+- **Minimum submission interval:** do not call `showLEDs()` again until at least one full frame transmission plus protocol latch/reset time has elapsed.
+- **Maximum submission interval:** keep phase cadence high enough that temporal blending remains above flicker visibility (for 5 phases, commonly target at least ~600 Hz phase refresh for ~120 Hz perceived output).
+
+Frame production and ingestion should also be rate-matched to the intended perceived refresh. If the content target is ~120 Hz perceived motion, generating/ingesting pattern frames far above ~120 FPS rarely improves image quality and usually just burns CPU cycles while increasing scheduling pressure.
+
+On backends that provide a busy/in-flight status, prefer that signal over a fixed delay. When no status API exists, use a conservative microsecond interval guard derived from measured on-wire frame time.
+
 On dual-core architectures (ESP32), the render loop should spin on a dedicated core with data preparation (LUT lookups, blend computation, incoming data processing) running on the other core. This separation is critical for sustaining ≥600 Hz LED refresh (≥120 Hz perceived) without frame drops.
 
 ### 6.3 Known High-FPS Parallel Output Drivers
