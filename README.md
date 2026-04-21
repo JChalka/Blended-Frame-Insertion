@@ -1,6 +1,16 @@
+
 # TemporalBFI
 
 Temporal rendering framework for addressable LED strips, providing sub-8-bit brightness resolution through Blended Frame Insertion (BFI). By rapidly alternating between two brightness levels across a multi-phase display cycle, the library achieves 16-bit equivalent perceived output using only 8-bit LED drivers. In the industry this is typically known as Temporal Dithering or FRC (Frame Rate Control). The main distinction (and why I chose to call it Blended Frame Insertion) is that we introduce a larger cycle length allowing for finer control.
+
+## Side-By-Sides (BFI Left half display, post-transfer-curve 16->8 scaled output on right)
+
+Transfer curve applied moves 0...65535 to 0...7522 (LED displays in the keycaps heat up too much if too bright)
+in 8-bit terms, equivalent to 0..29 brightness
+
+<img width="199" height="174" alt="20260421_185139-ezgif com-optimize" src="https://github.com/user-attachments/assets/5a546b07-fd0c-4ecf-85ed-aac237303817" />
+<img width="199" height="174" alt="20260421_190131-ezgif com-resize(1)" src="https://github.com/user-attachments/assets/53ca1b0c-1035-4322-9379-926c8c1fc21a" />
+<img width="199" height="174" alt="20260421_191746-ezgif com-resize" src="https://github.com/user-attachments/assets/3102a03e-d78d-4548-9534-f796669b6eb4" />
 
 > **[Skip to Project Background](#project-background)** if you'd rather read about the history and motivation before the technical details.
 
