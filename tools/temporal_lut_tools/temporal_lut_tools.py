@@ -802,6 +802,7 @@ def export_solver_header(lut_dir: Path, out_path: Path, max_bfi: int = 4, max_en
             lines.append(f"static const uint16_t LADDER_{ch}_COUNT = 0;\n")
             continue
         arr = json.loads(p.read_text(encoding="utf-8"))
+        arr = [e for e in arr if int(e.get("bfi", 0)) <= max_bfi]
         if max_entries is not None:
             arr = _decimate_ladder(arr, max_entries)
         lower_values = [int(e.get("lower_value", 0)) for e in arr]
@@ -943,14 +944,14 @@ def _default_solver_policy(max_bfi: int):
     return {
         "min_error_q16": 64,
         "relative_error_divisor": 24,
-        "min_value_ratio_numerator": 3,
-        "min_value_ratio_denominator": 8,
-        "low_end_protect_threshold": 48,
-        "low_end_max_drop": 10,
+        "min_value_ratio_numerator": 0,
+        "min_value_ratio_denominator": 1,
+        "low_end_protect_threshold": 0,
+        "low_end_max_drop": 0,
         "max_bfi": int(max_bfi),
-        "prefer_higher_bfi": True,
+        "prefer_higher_bfi": False,
         "preferred_min_bfi": 0,
-        "highlight_bypass_start": 240,
+        "highlight_bypass_start": 255,
     }
 
 
