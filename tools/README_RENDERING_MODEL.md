@@ -301,7 +301,131 @@ Any device capable of the following should be able to drive the temporal BFI sys
 - **Processing**: Fast enough to process incoming data and compute blended output within the per-cycle budget
 - **Dual-core preferred**: Dedicated render core + data processing core for sustained high frame rates
 
-### 6.5 Fail-Safe: Stale-Frame Protection
+### 6.5 MCU Memory Budgeting
+
+TemporalBFI memory usage splits into two independent pools:
+
+1. **Solver bucket tables**: fixed cost per configured bucket count, independent of LED count.
+2. **Render state buffers**: per-pixel cost for upper/lower values, BFI maps, and the active display buffer.
+
+The current True16 solver tables use three `uint8_t[channel_count][bucket_count]` arrays:
+
+```text
+solverValueLUT       channel_count x bucket_count x 1 byte
+solverValueFloorLUT  channel_count x bucket_count x 1 byte
+solverBFILUT         channel_count x bucket_count x 1 byte
+```
+
+So the solver table cost is:
+
+```text
+RGB solver_bytes  = bucket_count x 3 channels x 3 tables = bucket_count x 9 bytes
+RGBW solver_bytes = bucket_count x 4 channels x 3 tables = bucket_count x 12 bytes
+```
+
+If matching Q16 transfer curves are also kept at the same bucket count, assume one `uint16_t` transfer curve per channel:
+
+```text
+RGB transfer_bytes  = bucket_count x 3 channels x 2 bytes = bucket_count x 6 bytes
+RGBW transfer_bytes = bucket_count x 4 channels x 2 bytes = bucket_count x 8 bytes
+
+RGB solver_plus_transfer_bytes  = bucket_count x 15 bytes
+RGBW solver_plus_transfer_bytes = bucket_count x 20 bytes
+```
+
+These estimates describe storage only. Tables may live in RAM, DMAMEM, or flash/PROGMEM depending on the target and how the firmware is generated. If the tables are in PROGMEM, they primarily consume flash rather than runtime RAM.
+
+| Solver buckets | RGB solver only | RGB + matching transfer | RGBW solver only | RGBW + matching transfer |
+|---:|---:|---:|---:|---:|
+| 0 | 0 B (0.0 KiB) | 0 B (0.0 KiB) | 0 B (0.0 KiB) | 0 B (0.0 KiB) |
+| 256 | 2,304 B (2.2 KiB) | 3,840 B (3.8 KiB) | 3,072 B (3.0 KiB) | 5,120 B (5.0 KiB) |
+| 512 | 4,608 B (4.5 KiB) | 7,680 B (7.5 KiB) | 6,144 B (6.0 KiB) | 10,240 B (10.0 KiB) |
+| 1,024 | 9,216 B (9.0 KiB) | 15,360 B (15.0 KiB) | 12,288 B (12.0 KiB) | 20,480 B (20.0 KiB) |
+| 2,048 | 18,432 B (18.0 KiB) | 30,720 B (30.0 KiB) | 24,576 B (24.0 KiB) | 40,960 B (40.0 KiB) |
+| 4,096 | 36,864 B (36.0 KiB) | 61,440 B (60.0 KiB) | 49,152 B (48.0 KiB) | 81,920 B (80.0 KiB) |
+| 8,192 | 73,728 B (72.0 KiB) | 122,880 B (120.0 KiB) | 98,304 B (96.0 KiB) | 163,840 B (160.0 KiB) |
+| 16,384 | 147,456 B (144.0 KiB) | 245,760 B (240.0 KiB) | 196,608 B (192.0 KiB) | 327,680 B (320.0 KiB) |
+| 32,767 | 294,903 B (288.0 KiB) | 491,505 B (480.0 KiB) | 393,204 B (384.0 KiB) | 655,340 B (640.0 KiB) |
+| 65,535 | 589,815 B (576.0 KiB) | 983,025 B (960.0 KiB) | 786,420 B (768.0 KiB) | 1,310,700 B (1,280.0 KiB) |
+
+#### 6.5.1 Per-Pixel Render Buffers
+
+For RGB output, the core per-pixel buffers are:
+
+```text
+upperFrameBuffer   3 bytes/pixel  (G,R,B upper values)
+lowerFrameBuffer   3 bytes/pixel  (G,R,B floor values)
+displayBuffer      3 bytes/pixel  (active RGB frame sent to LED backend)
+BFI maps, normal   3 bytes/pixel  (one uint8_t map per G,R,B channel)
+BFI map, packed    2 bytes/pixel  (packed storage still uses two bytes/pixel)
+```
+
+For RGBW output, the core per-pixel buffers are:
+
+```text
+upperFrameBuffer   4 bytes/pixel  (G,R,B,W upper values)
+lowerFrameBuffer   4 bytes/pixel  (G,R,B,W floor values)
+displayBuffer      4 bytes/pixel  (active RGBW frame sent to LED backend)
+BFI maps, normal   4 bytes/pixel  (one uint8_t map per G,R,B,W channel)
+BFI map, packed    2 bytes/pixel  (two bytes hold four 4-bit BFI values)
+```
+
+RGB upper/lower solves cost 6 bytes per pixel before BFI storage. RGBW upper/lower solves cost 8 bytes per pixel. Normal BFI maps add one byte per active channel; packed BFI maps use 2 bytes per pixel in both RGB and RGBW modes.
+
+RGB buffer groups:
+
+| Buffer group | Normal BFI maps | Packed BFI map |
+|---|---:|---:|
+| Upper + lower solve buffers only | 6 bytes/pixel | 6 bytes/pixel |
+| BFI storage only | 3 bytes/pixel | 2 bytes/pixel |
+| Upper + lower + BFI storage | 9 bytes/pixel | 8 bytes/pixel |
+| Upper + lower + BFI + display buffer | 12 bytes/pixel | 11 bytes/pixel |
+
+RGBW buffer groups:
+
+| Buffer group | Normal BFI maps | Packed BFI map |
+|---|---:|---:|
+| Upper + lower solve buffers only | 8 bytes/pixel | 8 bytes/pixel |
+| BFI storage only | 4 bytes/pixel | 2 bytes/pixel |
+| Upper + lower + BFI storage | 12 bytes/pixel | 10 bytes/pixel |
+| Upper + lower + BFI + display buffer | 16 bytes/pixel | 14 bytes/pixel |
+
+Example RGB render-buffer costs:
+
+| Pixels | Upper + lower | Normal BFI maps | Packed BFI map | Upper/lower + normal BFI | Upper/lower + packed BFI | With display, normal BFI | With display, packed BFI |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 96 | 576 B | 288 B | 192 B | 864 B | 768 B | 1,152 B | 1,056 B |
+| 1,200 | 7,200 B | 3,600 B | 2,400 B | 10,800 B | 9,600 B | 14,400 B | 13,200 B |
+| 2,400 | 14,400 B | 7,200 B | 4,800 B | 21,600 B | 19,200 B | 28,800 B | 26,400 B |
+| 3,000 | 18,000 B | 9,000 B | 6,000 B | 27,000 B | 24,000 B | 36,000 B | 33,000 B |
+
+Example RGBW render-buffer costs:
+
+| Pixels | Upper + lower | Normal BFI maps | Packed BFI map | Upper/lower + normal BFI | Upper/lower + packed BFI | With display, normal BFI | With display, packed BFI |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 96 | 768 B | 384 B | 192 B | 1,152 B | 960 B | 1,536 B | 1,344 B |
+| 1,200 | 9,600 B | 4,800 B | 2,400 B | 14,400 B | 12,000 B | 19,200 B | 16,800 B |
+| 2,400 | 19,200 B | 9,600 B | 4,800 B | 28,800 B | 24,000 B | 38,400 B | 33,600 B |
+| 3,000 | 24,000 B | 12,000 B | 6,000 B | 36,000 B | 30,000 B | 48,000 B | 42,000 B |
+
+The packed BFI representation cuts RGBW BFI-map storage in half, from 4 bytes/pixel to 2 bytes/pixel. For RGB-only output it reduces BFI-map storage from 3 bytes/pixel to 2 bytes/pixel. It does not reduce the upper/lower solve buffers or the active display buffer.
+
+#### 6.5.2 Practical Memory Targets
+
+For low-memory MCUs, the first large lever is the solver bucket count. The second is whether transfer curves are stored at full solver resolution or at a smaller independent resolution. A 4,096-bucket RGB solver is 36 KiB for the three runtime solver tables, or 60 KiB if matching Q16 transfer curves are also resident. A 4,096-bucket RGBW solver is 48 KiB / 80 KiB. At 16,384 buckets those become 144 KiB / 240 KiB for RGB and 192 KiB / 320 KiB for RGBW before render buffers.
+
+For RAM-constrained targets, likely minimum viable profiles are:
+
+| Target class | Suggested solver buckets | Transfer strategy | BFI map strategy | Notes |
+|---|---:|---|---|---|
+| Very small MCU | 256-1,024 | Use 256-entry or flash-resident curves | Packed | Lowest RAM target; coarser True16 solve. |
+| Midrange MCU | 2,048-4,096 | Match buckets only if RAM allows | Packed preferred | Good first target for ESP32-class RAM budgets. |
+| Teensy 4.x RAM1/RAM2 split | 4,096-8,192 | Keep large tables in DMAMEM/PROGMEM where possible | Normal or packed | Enough room for calibration experiments, but table placement matters. |
+| High-memory / flash-table target | 16,384+ | Prefer PROGMEM/generated headers | Packed for large pixel counts | High solver precision; not suitable as pure RAM tables on small MCUs. |
+
+Additional memory not included above: stack, serial/USB buffers, LED backend DMA/internal buffers, 3D cube LUTs, calibration profiles, UDP/network buffers on ESP-class devices, and any capture/debug telemetry retained at runtime.
+
+### 6.6 Fail-Safe: Stale-Frame Protection
 
 Because the BFI render loop continuously alternates between upper and floor frames, the LEDs always hold the contents of whichever sub-frame was most recently transmitted. If the MCU loses power, crashes, or otherwise stops driving the data lines while the LED supply remains live, the strip will latch the last transmitted frame indefinitely. Depending on where in the cycle the output stopped, this could be the upper frame (full brightness), the floor frame (dim), or a partially written buffer — any of which may be visually jarring and electrically wasteful.
 

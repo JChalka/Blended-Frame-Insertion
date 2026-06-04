@@ -138,6 +138,8 @@ class App:
         )
         self.precomputed_solver_lut_size_var = tk.IntVar(value=int(cfg.get("precomputed_solver_lut_size", 0)))
         self.precomputed_solver_channels_var = tk.StringVar(value=cfg.get("precomputed_solver_channels", "rgbw"))
+        self.solver_output_limit_q16_var = tk.StringVar(value=str(cfg.get("solver_output_limit_q16", "")))
+        self.solver_output_limit_y_var = tk.StringVar(value=str(cfg.get("solver_output_limit_y", "")))
         self.summary_text = tk.StringVar(value="No LUT build run yet.")
         self.refresh_status_var = tk.StringVar(value="Preview idle.")
         self.refresh_progress_var = tk.DoubleVar(value=0.0)
@@ -203,6 +205,7 @@ class App:
         self.transfer_gamma_var = tk.DoubleVar(value=float(cfg.get("transfer_gamma", 2.2)))
         self.transfer_shadow_lift_var = tk.DoubleVar(value=float(cfg.get("transfer_shadow_lift", 0.0)))
         self.transfer_shoulder_var = tk.DoubleVar(value=float(cfg.get("transfer_shoulder", 0.0)))
+        self.transfer_rolloff_var = tk.DoubleVar(value=float(cfg.get("transfer_rolloff", 0.0)))
         self.transfer_bucket_count_var = tk.IntVar(value=int(cfg.get("transfer_bucket_count", 4096)))
         self.transfer_selection_var = tk.StringVar(value=cfg.get("transfer_selection", "floor"))
         self.transfer_peak_nits_override_var = tk.StringVar(value=str(cfg.get("transfer_peak_nits_override", "")))
@@ -223,6 +226,10 @@ class App:
         }
         self.transfer_channel_shoulder_vars = {
             ch: tk.DoubleVar(value=float(cfg.get(f"transfer_shoulder_{ch}", self.transfer_shoulder_var.get())))
+            for ch in CHANNELS
+        }
+        self.transfer_channel_rolloff_vars = {
+            ch: tk.DoubleVar(value=float(cfg.get(f"transfer_rolloff_{ch}", self.transfer_rolloff_var.get())))
             for ch in CHANNELS
         }
         self.transfer_export_json_var = tk.StringVar(value=cfg.get("transfer_export_json", str((self.default_export_dir / "transfer_curve_preview.json").resolve())))
@@ -280,6 +287,8 @@ class App:
             "precomputed_solver_out": self.precomputed_solver_out_var.get(),
             "precomputed_solver_lut_size": self.precomputed_solver_lut_size_var.get(),
             "precomputed_solver_channels": self.precomputed_solver_channels_var.get(),
+            "solver_output_limit_q16": self.solver_output_limit_q16_var.get(),
+            "solver_output_limit_y": self.solver_output_limit_y_var.get(),
             "preview_channel": self.preview_channel_var.get(),
             "calmeasure_dir": self.calmeasure_dir_var.get(),
             "true16_calmeasure_dir": self.true16_calmeasure_dir_var.get(),
@@ -339,6 +348,7 @@ class App:
             "transfer_gamma": self.transfer_gamma_var.get(),
             "transfer_shadow_lift": self.transfer_shadow_lift_var.get(),
             "transfer_shoulder": self.transfer_shoulder_var.get(),
+            "transfer_rolloff": self.transfer_rolloff_var.get(),
             "transfer_bucket_count": self.transfer_bucket_count_var.get(),
             "transfer_selection": self.transfer_selection_var.get(),
             "transfer_peak_nits_override": self.transfer_peak_nits_override_var.get(),
@@ -360,6 +370,7 @@ class App:
             cfg[f"transfer_gamma_{ch}"] = self.transfer_channel_gamma_vars[ch].get()
             cfg[f"transfer_shadow_lift_{ch}"] = self.transfer_channel_shadow_lift_vars[ch].get()
             cfg[f"transfer_shoulder_{ch}"] = self.transfer_channel_shoulder_vars[ch].get()
+            cfg[f"transfer_rolloff_{ch}"] = self.transfer_channel_rolloff_vars[ch].get()
         self.config_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
     def on_close(self):
@@ -466,6 +477,10 @@ class App:
         ttk.Label(row3d, text="Derived mode follows solver ladder counts.").pack(side="left", padx=(12, 0))
         ttk.Label(row3d, text="Channels").pack(side="left", padx=(16, 0))
         ttk.Combobox(row3d, textvariable=self.precomputed_solver_channels_var, values=["rgbw", "rgb", "G", "R", "B", "W"], state="readonly", width=6).pack(side="left", padx=6)
+        ttk.Label(row3d, text="Limit Q16").pack(side="left", padx=(16, 0))
+        ttk.Entry(row3d, textvariable=self.solver_output_limit_q16_var, width=9).pack(side="left", padx=6)
+        ttk.Label(row3d, text="Limit Y/nits").pack(side="left", padx=(8, 0))
+        ttk.Entry(row3d, textvariable=self.solver_output_limit_y_var, width=9).pack(side="left", padx=6)
 
         row3e = ttk.Frame(frame); row3e.pack(fill="x", padx=8, pady=(0,8))
         ttk.Label(row3e, text="Precomputed solver LUT header").pack(side="left")
@@ -1133,6 +1148,8 @@ class App:
         ttk.Entry(transfer_top, textvariable=self.transfer_shadow_lift_var, width=8).pack(side="left", padx=6)
         ttk.Label(transfer_top, text="Shoulder").pack(side="left")
         ttk.Entry(transfer_top, textvariable=self.transfer_shoulder_var, width=8).pack(side="left", padx=6)
+        ttk.Label(transfer_top, text="Roll-off").pack(side="left")
+        ttk.Entry(transfer_top, textvariable=self.transfer_rolloff_var, width=8).pack(side="left", padx=6)
         ttk.Label(transfer_top, text="Buckets (0=auto)").pack(side="left")
         ttk.Combobox(transfer_top, textvariable=self.transfer_bucket_count_var, values=HIGH_RES_EXPORT_SIZE_OPTIONS, state="readonly", width=8).pack(side="left", padx=6)
         ttk.Label(transfer_top, text="Selection").pack(side="left")
@@ -1164,6 +1181,8 @@ class App:
             ttk.Entry(row, textvariable=self.transfer_channel_shadow_lift_vars[ch], width=8).pack(side="left", padx=6)
             ttk.Label(row, text="Shoulder").pack(side="left")
             ttk.Entry(row, textvariable=self.transfer_channel_shoulder_vars[ch], width=8).pack(side="left", padx=6)
+            ttk.Label(row, text="Roll-off").pack(side="left")
+            ttk.Entry(row, textvariable=self.transfer_channel_rolloff_vars[ch], width=8).pack(side="left", padx=6)
 
         transfer_export_row = ttk.Frame(transfer_tab)
         transfer_export_row.pack(fill="x", padx=8, pady=(0, 4))
@@ -2523,12 +2542,14 @@ class App:
                 "gamma": max(0.05, float(self.transfer_channel_gamma_vars[channel].get())),
                 "shadow_lift": self._clamp01(self.transfer_channel_shadow_lift_vars[channel].get()),
                 "shoulder": self._clamp01(self.transfer_channel_shoulder_vars[channel].get()),
+                "rolloff": self._clamp01(self.transfer_channel_rolloff_vars[channel].get()),
             }
         return {
             "curve": self.transfer_curve_var.get(),
             "gamma": max(0.05, float(self.transfer_gamma_var.get())),
             "shadow_lift": self._clamp01(self.transfer_shadow_lift_var.get()),
             "shoulder": self._clamp01(self.transfer_shoulder_var.get()),
+            "rolloff": self._clamp01(self.transfer_rolloff_var.get()),
         }
 
     def _collect_transfer_channel_overrides(self):
@@ -2555,6 +2576,7 @@ class App:
             "--gamma", str(self.transfer_gamma_var.get()),
             "--shadow-lift", str(self.transfer_shadow_lift_var.get()),
             "--shoulder", str(self.transfer_shoulder_var.get()),
+            "--rolloff", str(self.transfer_rolloff_var.get()),
             "--selection", self.transfer_selection_var.get(),
         ]
         peak_nits_override = self._parse_optional_float(self.transfer_peak_nits_override_var.get())
@@ -2573,6 +2595,7 @@ class App:
                 args += [f"--gamma-{suffix}", str(cfg["gamma"])]
                 args += [f"--shadow-lift-{suffix}", str(cfg["shadow_lift"])]
                 args += [f"--shoulder-{suffix}", str(cfg["shoulder"])]
+                args += [f"--rolloff-{suffix}", str(cfg["rolloff"])]
 
     def _update_transfer_curve_controls(self, *_args):
         curve = self.transfer_curve_var.get()
@@ -2590,6 +2613,8 @@ class App:
         elif curve == "srgb-ish":
             note = "sRGB-ish uses its piecewise transfer approximation. Gamma is ignored for this preset."
 
+        if self._clamp01(self.transfer_rolloff_var.get()) > 0.0:
+            note += " Roll-off is a high-only soft knee; with Nit cap active it tone-maps highlights into the cap instead of scaling the whole curve."
         self.transfer_curve_note_var.set(note)
         if hasattr(self, "transfer_gamma_entry"):
             self.transfer_gamma_entry.configure(state=("normal" if gamma_active else "disabled"))
@@ -2604,13 +2629,40 @@ class App:
                 channel_curve = self.transfer_channel_curve_vars[ch].get()
                 gamma_entry.configure(state=("normal" if self._transfer_curve_uses_gamma(channel_curve) else "disabled"))
 
-    def _apply_transfer_curve_norm(self, x):
-        cfg = self._get_transfer_curve_config(self.preview_channel_var.get())
+    def _apply_highlight_rolloff_norm(self, y, rolloff=0.0, ceiling=1.0):
+        y = self._clamp01(float(y))
+        rolloff = self._clamp01(float(rolloff))
+        ceiling = self._clamp01(float(ceiling))
+        if rolloff <= 0.0:
+            return y
+        if ceiling <= 0.0:
+            return 0.0
+
+        knee = ceiling * (1.0 - 0.50 * rolloff)
+        knee = max(0.0, min(knee, ceiling))
+        if y <= knee:
+            return self._clamp01(y)
+        if y >= 1.0:
+            return self._clamp01(ceiling)
+
+        in_span = max(1e-9, 1.0 - knee)
+        out_span = max(0.0, ceiling - knee)
+        if out_span <= 1e-9:
+            return self._clamp01(min(y, ceiling))
+
+        t = self._clamp01((y - knee) / in_span)
+        strength = 1.0 + 8.0 * rolloff
+        eased = math.log1p(strength * t) / math.log1p(strength)
+        return self._clamp01(knee + out_span * eased)
+
+    def _apply_transfer_curve_norm(self, x, channel=None, rolloff_override=None):
+        cfg = self._get_transfer_curve_config(channel or self.preview_channel_var.get())
         x = self._clamp01(x)
         curve = cfg["curve"]
         gamma = cfg["gamma"]
         shadow_lift = cfg["shadow_lift"]
         shoulder = cfg["shoulder"]
+        rolloff = cfg["rolloff"] if rolloff_override is None else self._clamp01(rolloff_override)
 
         if curve == "linear":
             y = x
@@ -2637,6 +2689,8 @@ class App:
             y = (1.0 - shadow_lift) * y + shadow_lift * math.sqrt(max(0.0, y))
         if shoulder > 0.0:
             y = 1.0 - ((1.0 - y) ** (1.0 / (1.0 + shoulder)))
+        if rolloff > 0.0:
+            y = self._apply_highlight_rolloff_norm(y, rolloff=rolloff, ceiling=1.0)
         return self._clamp01(y)
 
     def _load_monotonic_ladder_preview(self, channel):
@@ -2829,9 +2883,20 @@ class App:
 
         for i in xs:
             x = i / (buckets - 1)
-            y = self._apply_transfer_curve_norm(x)
+            y = self._apply_transfer_curve_norm(
+                x,
+                channel=ch,
+                rolloff_override=0.0 if (nit_cap_enabled and float(curve_cfg.get("rolloff", 0.0)) > 0.0) else None,
+            )
             if nit_cap_enabled:
-                y = float(y) * float(normalized_limit)
+                if float(curve_cfg.get("rolloff", 0.0)) > 0.0:
+                    y = self._apply_highlight_rolloff_norm(
+                        y,
+                        rolloff=curve_cfg["rolloff"],
+                        ceiling=float(normalized_limit),
+                    )
+                else:
+                    y = float(y) * float(normalized_limit)
             tq16 = int(round(y * 65535.0))
             state = self._choose_mono_state(ladder, tq16)
             target_q16.append(tq16)
@@ -3038,6 +3103,12 @@ class App:
     def export_solver_header(self):
         out_path = Path(self.solver_header_out_var.get()).expanduser(); out_path.parent.mkdir(parents=True, exist_ok=True)
         args = [sys.executable, str(self.tool_path), "export-solver-header", "--lut-dir", str(Path(self.build_out_dir_var.get()).expanduser()), "--out", str(out_path), "--max-bfi", str(self.plan_max_bfi_var.get())]
+        output_limit_q16 = self._parse_optional_int(self.solver_output_limit_q16_var.get())
+        if output_limit_q16 is not None:
+            args += ["--solver-output-limit-q16", str(self._clamp_u16(output_limit_q16))]
+        output_limit_y = self._parse_optional_float(self.solver_output_limit_y_var.get())
+        if output_limit_y is not None and output_limit_y > 0.0:
+            args += ["--solver-output-limit-y", str(float(output_limit_y))]
         self.run_subprocess(args, on_success=lambda _s: messagebox.showinfo("Exported", f"Solver header written to:\n{out_path}"))
 
     def export_precomputed_solver_luts_header(self):
@@ -3055,6 +3126,12 @@ class App:
             "--solver-lut-size", str(self.precomputed_solver_lut_size_var.get()),
             "--channels", str(self.precomputed_solver_channels_var.get()),
         ]
+        output_limit_q16 = self._parse_optional_int(self.solver_output_limit_q16_var.get())
+        if output_limit_q16 is not None:
+            args += ["--solver-output-limit-q16", str(self._clamp_u16(output_limit_q16))]
+        output_limit_y = self._parse_optional_float(self.solver_output_limit_y_var.get())
+        if output_limit_y is not None and output_limit_y > 0.0:
+            args += ["--solver-output-limit-y", str(float(output_limit_y)), "--limit-lut-dir", str(Path(self.build_out_dir_var.get()).expanduser())]
         self.run_subprocess(
             args,
             on_success=lambda _s: messagebox.showinfo("Exported", f"Precomputed solver LUT header written to:\n{out_path}"),

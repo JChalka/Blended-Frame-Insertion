@@ -786,7 +786,51 @@ def _decimate_ladder(entries, max_entries):
     return result
 
 
-def export_solver_header(lut_dir: Path, out_path: Path, max_bfi: int = 4, max_entries: int | None = None):
+def _channel_max_y_from_lut_dir(lut_dir: Path, color: str) -> float | None:
+    summary_path = Path(lut_dir) / "lut_summary.json"
+    if not summary_path.exists():
+        return None
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    node = (summary.get("channels", {}) or {}).get(str(color).upper(), {}) or {}
+    for key in ("max_estimated_nobfi_Y", "max_y", "max_Y"):
+        try:
+            value = float(node.get(key))
+        except Exception:
+            continue
+        if value > 0.0:
+            return value
+    return None
+
+
+def _resolve_solver_output_limit_q16(lut_dir: Path | None, color: str, output_limit_q16=None, output_limit_y=None) -> int:
+    limit = 65535
+    if output_limit_q16 not in (None, ""):
+        limit = min(limit, _clamp_u16(int(output_limit_q16)))
+    if output_limit_y not in (None, ""):
+        if lut_dir is None:
+            raise ValueError("--solver-output-limit-y requires a LUT directory so channel peak Y can be resolved")
+        max_y = _channel_max_y_from_lut_dir(Path(lut_dir), color)
+        if max_y is None or max_y <= 0.0:
+            raise ValueError(f"Could not resolve max Y for channel {color} from {Path(lut_dir) / 'lut_summary.json'}")
+        y_limit_q16 = _clamp_u16(round((float(output_limit_y) / float(max_y)) * 65535.0))
+        limit = min(limit, y_limit_q16)
+    return int(limit)
+
+
+def _normalize_solver_output_q16_for_limit(output_q16: int, limit_q16: int) -> int:
+    output_q16 = _clamp_u16(int(output_q16))
+    limit_q16 = _clamp_u16(int(limit_q16))
+    if output_q16 <= 0 or limit_q16 <= 0:
+        return 0
+    if limit_q16 >= 65535:
+        return output_q16
+    return _clamp_u16(round((float(output_q16) / float(limit_q16)) * 65535.0))
+
+
+def export_solver_header(lut_dir: Path, out_path: Path, max_bfi: int = 4, max_entries: int | None = None, output_limit_q16=None, output_limit_y=None):
     lines = [
         "// Auto-generated temporal ladder solver header",
         "#pragma once", "", '#include <TemporalBFI.h>', "",
@@ -794,6 +838,7 @@ def export_solver_header(lut_dir: Path, out_path: Path, max_bfi: int = 4, max_en
         f"static const uint8_t MAX_BFI = {max_bfi};", ""
     ]
     for ch in CHANNELS:
+        limit_q16 = _resolve_solver_output_limit_q16(lut_dir, ch, output_limit_q16=output_limit_q16, output_limit_y=output_limit_y)
         p_mono = lut_dir / f"{ch.lower()}_monotonic_ladder.json"
         p_full = lut_dir / f"{ch.lower()}_temporal_ladder.json"
         p = p_mono if p_mono.exists() else p_full
@@ -803,12 +848,15 @@ def export_solver_header(lut_dir: Path, out_path: Path, max_bfi: int = 4, max_en
             continue
         arr = json.loads(p.read_text(encoding="utf-8"))
         arr = [e for e in arr if int(e.get("bfi", 0)) <= max_bfi]
+        arr = [e for e in arr if int(e.get("output_q16", 0)) <= limit_q16]
         if max_entries is not None:
             arr = _decimate_ladder(arr, max_entries)
         lower_values = [int(e.get("lower_value", 0)) for e in arr]
+        lines.append(f"static const uint16_t LADDER_{ch}_PHYSICAL_LIMIT_Q16 = {limit_q16};")
         lines.append(f"static const TemporalBFI::LadderEntry LADDER_{ch}[] PROGMEM = {{")
         for e in arr:
-            lines.append(f"    {{{int(e['output_q16'])}, {int(e['value'])}, {int(e['bfi'])}}},")
+            normalized_output_q16 = _normalize_solver_output_q16_for_limit(int(e["output_q16"]), limit_q16)
+            lines.append(f"    {{{normalized_output_q16}, {int(e['value'])}, {int(e['bfi'])}}},")
         lines.append("};")
         lines.append(f"static const uint8_t LADDER_{ch}_LOWER[] PROGMEM = {{")
         for i in range(0, len(lower_values), 32):
@@ -1267,7 +1315,7 @@ def _progress(msg: str):
     print(msg, file=sys.stderr, flush=True)
 
 
-def _build_solver_precomputed_tables(runtime_ladders, calibration, policy, solver_fixed_bfi_levels: int, solver_lut_size: int | None = None, include_output_q16: bool = False, include_fixed_bfi: bool = False, channel_indices: list[int] | None = None):
+def _build_solver_precomputed_tables(runtime_ladders, calibration, policy, solver_fixed_bfi_levels: int, solver_lut_size: int | None = None, include_output_q16: bool = False, include_fixed_bfi: bool = False, channel_indices: list[int] | None = None, output_limit_q16_by_solver_channel=None):
     """Build precomputed solver tables for the given channel indices.
 
     ``channel_indices`` selects which solver-order channels (0=G,1=R,2=B,3=W)
@@ -1277,6 +1325,8 @@ def _build_solver_precomputed_tables(runtime_ladders, calibration, policy, solve
     if channel_indices is None:
         channel_indices = list(range(4))
     num_ch = len(channel_indices)
+    if output_limit_q16_by_solver_channel is None:
+        output_limit_q16_by_solver_channel = [65535] * 4
 
     fixed_levels = int(solver_fixed_bfi_levels)
     if fixed_levels < 1:
@@ -1307,8 +1357,9 @@ def _build_solver_precomputed_tables(runtime_ladders, calibration, policy, solve
     ch_labels = [SOLVER_CHANNEL_ORDER[ci] for ci in channel_indices]
     _progress(f"Building primary solver LUTs ({resolved_solver_lut_size} entries x {num_ch} channels [{','.join(ch_labels)}])...")
     for out_idx, src_ch in enumerate(channel_indices):
+        channel_limit_q16 = _clamp_u16(output_limit_q16_by_solver_channel[src_ch])
         for i in range(resolved_solver_lut_size):
-            q16 = (int(i) * 65535) // int(resolved_solver_lut_size - 1)
+            q16 = (int(i) * int(channel_limit_q16)) // int(resolved_solver_lut_size - 1)
             state = _encode_state_from16(
                 q16,
                 prepared_entries[src_ch],
@@ -1544,6 +1595,9 @@ def export_precomputed_solver_luts_header(
     include_output_q16: bool = False,
     include_fixed_bfi: bool = False,
     channels: str = "rgbw",
+    output_limit_q16=None,
+    output_limit_y=None,
+    limit_lut_dir: Path | None = None,
 ):
     _progress(f"Loading solver header: {solver_header}")
     runtime = _load_runtime_solver_ladders(solver_header)
@@ -1565,6 +1619,14 @@ def export_precomputed_solver_luts_header(
     num_ch = len(channel_indices)
     ch_labels = [SOLVER_CHANNEL_ORDER[ci] for ci in channel_indices]
     _progress(f"Channel mode: {channels_upper} -> {num_ch} channel(s) [{', '.join(ch_labels)}]")
+    output_limit_q16_by_solver_channel = [65535] * 4
+    for solver_index, color in enumerate(SOLVER_CHANNEL_ORDER):
+        output_limit_q16_by_solver_channel[solver_index] = _resolve_solver_output_limit_q16(
+            limit_lut_dir,
+            color,
+            output_limit_q16=output_limit_q16,
+            output_limit_y=output_limit_y,
+        )
 
     if max_bfi is None:
         effective_max_bfi = int(solver_header_max_bfi)
@@ -1610,6 +1672,7 @@ def export_precomputed_solver_luts_header(
             _progress(f"NOTE: solver_lut_size={effective_solver_lut_size} is smaller than derived ladder count {derived_solver_lut_size}; the LUT will uniformly downsample the q16 range.")
 
     _progress(f"Building precomputed tables (LUT size={effective_solver_lut_size}, fixed_levels={fixed_levels}, max_bfi={effective_max_bfi}, channels={channels_upper})...")
+    _progress("Output limits: " + ", ".join(f"{SOLVER_CHANNEL_ORDER[i]}={output_limit_q16_by_solver_channel[i]}" for i in channel_indices))
     tables = _build_solver_precomputed_tables(
         runtime_ladders=runtime["ladders"],
         calibration=calibration,
@@ -1619,6 +1682,7 @@ def export_precomputed_solver_luts_header(
         include_output_q16=include_output_q16,
         include_fixed_bfi=include_fixed_bfi,
         channel_indices=channel_indices,
+        output_limit_q16_by_solver_channel=output_limit_q16_by_solver_channel,
     )
 
     ch_comment = ", ".join(f"{i}={SOLVER_CHANNEL_ORDER[ci]}" for i, ci in enumerate(channel_indices))
@@ -1638,6 +1702,7 @@ def export_precomputed_solver_luts_header(
         f"static constexpr uint8_t SOLVER_FIXED_BFI_LEVELS = {fixed_levels};",
         f"static constexpr uint8_t NUM_CHANNELS = {num_ch};",
         f"static constexpr uint32_t SOLVER_LUT_SIZE = {int(tables['solverLUTSize'])};",
+        "static const uint16_t SOLVER_OUTPUT_LIMIT_Q16[NUM_CHANNELS] = {" + ", ".join(str(int(output_limit_q16_by_solver_channel[ci])) for ci in channel_indices) + "};",
         "",
     ]
 
@@ -1703,6 +1768,7 @@ def export_precomputed_solver_luts_header(
         "calibration_mode": calibration_mode,
         "channels": channels_upper,
         "num_channels": num_ch,
+        "output_limits_q16": {SOLVER_CHANNEL_ORDER[ci]: int(output_limit_q16_by_solver_channel[ci]) for ci in channel_indices},
     }
 
 def _active_channels(r, g, b, w):
@@ -6806,16 +6872,55 @@ def _bt1886_eotf_norm(x: float, black_level: float = 0.001) -> float:
     normalized = (luminance - black_level) / (white_level - black_level)
     return _clamp01(normalized)
 
+def _apply_highlight_rolloff_norm(y: float, rolloff: float = 0.0, ceiling: float = 1.0) -> float:
+    """Soft-knee highlight roll-off for transfer curve shaping.
+
+    With ceiling=1.0 this is a standalone high-end reshaper that leaves
+    black/mid values mostly alone and eases the upper range toward white.
+    With ceiling<1.0, it behaves like a tone-map into an absolute nit cap:
+    values below the computed knee are preserved, and values above the knee
+    are compressed smoothly into the cap instead of scaling the whole curve.
+    """
+    y = _clamp01(float(y))
+    rolloff = _clamp01(float(rolloff))
+    ceiling = _clamp01(float(ceiling))
+    if rolloff <= 0.0:
+        return y
+    if ceiling <= 0.0:
+        return 0.0
+
+    # Stronger roll-off starts earlier.  With an absolute cap this keeps
+    # sub-cap diffuse highlights intact while giving MDL4000-style speculars
+    # a controlled landing zone instead of a hard ceiling.
+    knee = ceiling * (1.0 - 0.50 * rolloff)
+    knee = max(0.0, min(knee, ceiling))
+    if y <= knee:
+        return _clamp01(y)
+    if y >= 1.0:
+        return _clamp01(ceiling)
+
+    in_span = max(1e-9, 1.0 - knee)
+    out_span = max(0.0, ceiling - knee)
+    if out_span <= 1e-9:
+        return _clamp01(min(y, ceiling))
+
+    t = _clamp01((y - knee) / in_span)
+    strength = 1.0 + 8.0 * rolloff
+    eased = math.log1p(strength * t) / math.log1p(strength)
+    return _clamp01(knee + out_span * eased)
+
 def apply_transfer_curve_norm(
     x: float,
     curve: str = "gamma",
     gamma: float = 2.2,
     shadow_lift: float = 0.0,
-    shoulder: float = 0.0):
+    shoulder: float = 0.0,
+    rolloff: float = 0.0):
     x = _clamp01(float(x))
     gamma = max(0.05, float(gamma))
     shadow_lift = _clamp01(float(shadow_lift))
     shoulder = _clamp01(float(shoulder))
+    rolloff = _clamp01(float(rolloff))
 
     if curve == "linear":
         y = x
@@ -6848,6 +6953,11 @@ def apply_transfer_curve_norm(
     if shoulder > 0.0:
         y = 1.0 - ((1.0 - y) ** (1.0 / (1.0 + shoulder)))
 
+    # Roll-off is a high-only soft knee.  Absolute-cap handling uses the same
+    # helper with ceiling<1.0 in build_transfer_curve_preview().
+    if rolloff > 0.0:
+        y = _apply_highlight_rolloff_norm(y, rolloff=rolloff, ceiling=1.0)
+
     return _clamp01(y)
 
 def _build_transfer_curve_config(
@@ -6855,12 +6965,14 @@ def _build_transfer_curve_config(
     gamma: float = 2.2,
     shadow_lift: float = 0.0,
     shoulder: float = 0.0,
+    rolloff: float = 0.0,
 ):
     return {
         "type": str(curve),
         "gamma": float(max(0.05, float(gamma))),
         "shadow_lift": float(_clamp01(float(shadow_lift))),
         "shoulder": float(_clamp01(float(shoulder))),
+        "rolloff": float(_clamp01(float(rolloff))),
     }
 
 def _resolve_transfer_channel_configs(
@@ -6868,6 +6980,7 @@ def _resolve_transfer_channel_configs(
     gamma: float = 2.2,
     shadow_lift: float = 0.0,
     shoulder: float = 0.0,
+    rolloff: float = 0.0,
     channel_configs: dict | None = None,
 ):
     shared = _build_transfer_curve_config(
@@ -6875,6 +6988,7 @@ def _resolve_transfer_channel_configs(
         gamma=gamma,
         shadow_lift=shadow_lift,
         shoulder=shoulder,
+        rolloff=rolloff,
     )
     resolved = {}
     for ch in CHANNELS:
@@ -6884,6 +6998,7 @@ def _resolve_transfer_channel_configs(
             gamma=override.get("gamma", shared["gamma"]),
             shadow_lift=override.get("shadow_lift", shared["shadow_lift"]),
             shoulder=override.get("shoulder", shared["shoulder"]),
+            rolloff=override.get("rolloff", shared["rolloff"]),
         )
     return shared, resolved
 
@@ -7005,6 +7120,7 @@ def build_transfer_curve_preview(
     gamma: float = 2.2,
     shadow_lift: float = 0.0,
     shoulder: float = 0.0,
+    rolloff: float = 0.0,
     selection: str = "floor",
     channel_configs: dict | None = None,
     peak_nits_override: float | None = None,
@@ -7020,6 +7136,7 @@ def build_transfer_curve_preview(
         gamma=gamma,
         shadow_lift=shadow_lift,
         shoulder=shoulder,
+        rolloff=rolloff,
         channel_configs=channel_configs,
     )
     peak_meta = _resolve_transfer_peak_metadata(lut_dir, peak_nits_override=peak_nits_override, exclude_white=exclude_white)
@@ -7046,6 +7163,7 @@ def build_transfer_curve_preview(
             "gamma": float(shared_curve["gamma"]),
             "shadow_lift": float(shared_curve["shadow_lift"]),
             "shoulder": float(shared_curve["shoulder"]),
+            "rolloff": float(shared_curve["rolloff"]),
             "selection": selection,
             "per_channel_enabled": bool(channel_configs),
             "channels": resolved_channel_curves,
@@ -7074,9 +7192,17 @@ def build_transfer_curve_preview(
                 gamma=curve_cfg["gamma"],
                 shadow_lift=curve_cfg["shadow_lift"],
                 shoulder=curve_cfg["shoulder"],
+                rolloff=0.0 if (nit_cap_meta["enabled"] and float(curve_cfg.get("rolloff", 0.0)) > 0.0) else curve_cfg["rolloff"],
             )
             if nit_cap_meta["enabled"]:
-                y = float(y) * float(nit_cap_meta["normalized_limit"])
+                if float(curve_cfg.get("rolloff", 0.0)) > 0.0:
+                    y = _apply_highlight_rolloff_norm(
+                        y,
+                        rolloff=curve_cfg["rolloff"],
+                        ceiling=float(nit_cap_meta["normalized_limit"]),
+                    )
+                else:
+                    y = float(y) * float(nit_cap_meta["normalized_limit"])
             tq16 = int(round(y * 65535.0))
             state = choose_monotonic_state(mono, tq16, selection=selection)
             target_q16.append(tq16)
@@ -7097,6 +7223,7 @@ def export_transfer_json(
     gamma: float = 2.2,
     shadow_lift: float = 0.0,
     shoulder: float = 0.0,
+    rolloff: float = 0.0,
     selection: str = "floor",
     channel_configs: dict | None = None,
     peak_nits_override: float | None = None,
@@ -7104,7 +7231,7 @@ def export_transfer_json(
     exclude_white: bool = False):
     data = build_transfer_curve_preview(
         lut_dir, bucket_count=bucket_count, curve=curve, gamma=gamma,
-        shadow_lift=shadow_lift, shoulder=shoulder, selection=selection,
+        shadow_lift=shadow_lift, shoulder=shoulder, rolloff=rolloff, selection=selection,
         channel_configs=channel_configs,
         peak_nits_override=peak_nits_override,
         nit_cap=nit_cap,
@@ -7120,6 +7247,7 @@ def export_transfer_header(
     gamma: float = 2.2,
     shadow_lift: float = 0.0,
     shoulder: float = 0.0,
+    rolloff: float = 0.0,
     selection: str = "floor",
     channel_configs: dict | None = None,
     peak_nits_override: float | None = None,
@@ -7127,7 +7255,7 @@ def export_transfer_header(
     exclude_white: bool = False):
     data = build_transfer_curve_preview(
         lut_dir, bucket_count=bucket_count, curve=curve, gamma=gamma,
-        shadow_lift=shadow_lift, shoulder=shoulder, selection=selection,
+        shadow_lift=shadow_lift, shoulder=shoulder, rolloff=rolloff, selection=selection,
         channel_configs=channel_configs,
         peak_nits_override=peak_nits_override,
         nit_cap=nit_cap,
@@ -7154,10 +7282,14 @@ def export_transfer_header(
         f"static constexpr float EFFECTIVE_NIT_CAP = {float(nit_cap_meta.get('effective_nits') or 0.0):.6f}f;",
         f"static constexpr float NIT_CAP_NORMALIZED_LIMIT = {float(nit_cap_meta.get('normalized_limit', 1.0)):.9f}f;",
         f"static const uint8_t WHITE_EXCLUDED = {1 if white_excluded else 0};",
+        f"static constexpr float CURVE_ROLLOFF = {float(curve_meta.get('rolloff', 0.0)):.6f}f;",
         "",
     ]
     for ch in header_channels:
         lines.append(f"static constexpr float PEAK_NITS_{ch} = {float(data.get('channel_peak_nits', {}).get(ch, 0.0)):.6f}f;")
+    for ch in header_channels:
+        ch_rolloff = float(((data.get("channels", {}).get(ch, {}) or {}).get("curve", {}) or {}).get("rolloff", curve_meta.get("rolloff", 0.0)))
+        lines.append(f"static constexpr float CURVE_ROLLOFF_{ch} = {ch_rolloff:.6f}f;")
     lines.append("")
     for ch in header_channels:
         chd = data["channels"][ch]
@@ -7181,6 +7313,7 @@ def _add_transfer_curve_parser_args(parser):
     parser.add_argument("--gamma", type=float, default=2.2, help="Used by gamma and toe-gamma curves only")
     parser.add_argument("--shadow-lift", type=float, default=0.0)
     parser.add_argument("--shoulder", type=float, default=0.0)
+    parser.add_argument("--rolloff", "--roll-off", dest="rolloff", type=float, default=0.0)
     parser.add_argument("--peak-nits-override", type=float, help="Optional absolute reference peak in nits. When omitted, the brightest measured channel from lut_summary.json is used")
     parser.add_argument("--nit-cap", type=float, help="Optional absolute nit cap referenced to the brightest measured channel peak. Bucket count remains unchanged")
     parser.add_argument("--exclude-white", action="store_true", default=False, help="Exclude the white (W) channel from export and auto-cap nits to the brightest RGB channel")
@@ -7191,6 +7324,7 @@ def _add_transfer_curve_parser_args(parser):
         parser.add_argument(f"--gamma-{suffix}", dest=f"gamma_{suffix}", type=float)
         parser.add_argument(f"--shadow-lift-{suffix}", dest=f"shadow_lift_{suffix}", type=float)
         parser.add_argument(f"--shoulder-{suffix}", dest=f"shoulder_{suffix}", type=float)
+        parser.add_argument(f"--rolloff-{suffix}", f"--roll-off-{suffix}", dest=f"rolloff_{suffix}", type=float)
 
 
 def _collect_transfer_channel_cli_overrides(args):
@@ -7201,7 +7335,8 @@ def _collect_transfer_channel_cli_overrides(args):
         gamma = getattr(args, f"gamma_{suffix}", None)
         shadow_lift = getattr(args, f"shadow_lift_{suffix}", None)
         shoulder = getattr(args, f"shoulder_{suffix}", None)
-        if curve is None and gamma is None and shadow_lift is None and shoulder is None:
+        rolloff = getattr(args, f"rolloff_{suffix}", None)
+        if curve is None and gamma is None and shadow_lift is None and shoulder is None and rolloff is None:
             continue
         cfg = {}
         if curve is not None:
@@ -7212,6 +7347,8 @@ def _collect_transfer_channel_cli_overrides(args):
             cfg["shadow_lift"] = shadow_lift
         if shoulder is not None:
             cfg["shoulder"] = shoulder
+        if rolloff is not None:
+            cfg["rolloff"] = rolloff
         channel_configs[ch] = cfg
     return channel_configs or None
 
@@ -7370,6 +7507,10 @@ def main():
     ap_export_solver.add_argument("--max-bfi", type=int, default=4)
     ap_export_solver.add_argument("--max-entries", type=int, default=None,
                                   help="Max ladder entries per channel (e.g. 4096 for 12-bit); omit for full ladder")
+    ap_export_solver.add_argument("--solver-output-limit-q16", type=int, default=None,
+                                  help="Physical output ceiling. Exported ladder Q16 is normalized so input 65535 lands on this physical Q16.")
+    ap_export_solver.add_argument("--solver-output-limit-y", type=float, default=None,
+                                  help="Absolute Y/nits output ceiling. Resolved per channel from lut_summary.json and normalized like --solver-output-limit-q16.")
 
     ap_export_solver_precomputed = sub.add_parser("export-precomputed-solver-luts-header")
     ap_export_solver_precomputed.add_argument("--solver-header", required=True)
@@ -7378,6 +7519,12 @@ def main():
     ap_export_solver_precomputed.add_argument("--max-bfi", type=int)
     ap_export_solver_precomputed.add_argument("--solver-fixed-bfi-levels", type=int)
     ap_export_solver_precomputed.add_argument("--solver-lut-size", type=int, default=0, help="Precomputed solver LUT size; use 0 to derive from the solver ladder counts")
+    ap_export_solver_precomputed.add_argument("--solver-output-limit-q16", type=int, default=None,
+                                              help="Physical output ceiling. Input 65535 in the precomputed table samples this physical Q16.")
+    ap_export_solver_precomputed.add_argument("--solver-output-limit-y", type=float, default=None,
+                                              help="Absolute Y/nits output ceiling. Requires --limit-lut-dir so per-channel max Y can be resolved.")
+    ap_export_solver_precomputed.add_argument("--limit-lut-dir", default=None,
+                                              help="LUT output directory containing lut_summary.json for --solver-output-limit-y. Usually the same as --lut-dir/build output dir.")
     ap_export_solver_precomputed.add_argument("--min-error-q16", type=int, default=64)
     ap_export_solver_precomputed.add_argument("--relative-error-divisor", type=int, default=24)
     ap_export_solver_precomputed.add_argument("--min-value-ratio-numerator", type=int, default=0)
@@ -7723,7 +7870,9 @@ def main():
         print(json.dumps({"ok": True, "out": args.out}, indent=2))
     elif args.cmd == "export-solver-header":
         export_solver_header(Path(args.lut_dir), Path(args.out), args.max_bfi,
-                            max_entries=args.max_entries)
+                            max_entries=args.max_entries,
+                            output_limit_q16=args.solver_output_limit_q16,
+                            output_limit_y=args.solver_output_limit_y)
         print(json.dumps({"ok": True, "out": args.out}, indent=2))
     elif args.cmd == "export-precomputed-solver-luts-header":
         result = export_precomputed_solver_luts_header(
@@ -7745,6 +7894,9 @@ def main():
             include_output_q16=args.include_output_q16,
             include_fixed_bfi=args.include_fixed_bfi,
             channels=args.channels,
+            output_limit_q16=args.solver_output_limit_q16,
+            output_limit_y=args.solver_output_limit_y,
+            limit_lut_dir=Path(args.limit_lut_dir) if args.limit_lut_dir else None,
         )
         print(json.dumps({"ok": True, **result}, indent=2))
     elif args.cmd == "patch-plan":
@@ -7999,6 +8151,7 @@ def main():
             gamma=args.gamma,
             shadow_lift=args.shadow_lift,
             shoulder=args.shoulder,
+            rolloff=args.rolloff,
             selection=args.selection,
             channel_configs=channel_configs,
             peak_nits_override=args.peak_nits_override,
@@ -8016,6 +8169,7 @@ def main():
             gamma=args.gamma,
             shadow_lift=args.shadow_lift,
             shoulder=args.shoulder,
+            rolloff=args.rolloff,
             selection=args.selection,
             channel_configs=channel_configs,
             peak_nits_override=args.peak_nits_override,

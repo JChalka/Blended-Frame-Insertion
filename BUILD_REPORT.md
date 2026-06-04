@@ -1,6 +1,6 @@
 # TemporalBFI Build Report
 
-**13/13** environments built successfully.
+**14/14** environments built successfully.
 
 ## Teensy (IMXRT1062)
 
@@ -15,6 +15,7 @@
 | rgbwNoExtractionDemo | SUCCESS | 106.0 KB | 1878.0 KB | 64.6 KB | 427.2 KB | 12.1 KB | 499.9 KB |
 | True16RGBWGradientDemo | SUCCESS | 106.0 KB | 1878.0 KB | 65.4 KB | 427.0 KB | 12.1 KB | 499.9 KB |
 | TemporalFastLEDDemo | SUCCESS | 127.0 KB | 1857.0 KB | 87.1 KB | 424.6 KB | 17.2 KB | 494.8 KB |
+| RGBW_Analytical_FastLED | SUCCESS | 1070.0 KB | 914.0 KB | 285.9 KB | 208.5 KB | 412.2 KB | 99.8 KB |
 | PackedBFIMapDemo | SUCCESS | 133.0 KB | 1851.0 KB | 92.5 KB | 392.8 KB | 12.1 KB | 499.9 KB |
 | CubeLUT3DDemo | SUCCESS | 160.0 KB | 7776.0 KB | 120.3 KB | 389.9 KB | 12.1 KB | 499.9 KB |
 | LoadPrecomputedDemo | SUCCESS | 73.0 KB | 1911.0 KB | 62.9 KB | 426.8 KB | 12.1 KB | 499.9 KB |
@@ -25,7 +26,7 @@
 |-------------|--------|------------|------------|------------|------------|-------------|------------|------|-----------|-------|
 | ESP32S3_DoubleBuffer | SUCCESS | 184.0 KB | 208.3 KB | 392.3 KB | 7799.7 KB | 93.7 KB | 240.1 KB | - | - | 476.7 KB |
 
-Target: **Teensy 4.0 (IMXRT1062) — 1984 KB Flash, 512 KB RAM1, 512 KB RAM2**<br>Environments: HyperTeensy, Calibration, FrameworkDemo, RGB16InputDemo, ColorCalibrationABDemo, PrecomputeDemo, rgbwNoExtractionDemo, True16RGBWGradientDemo, TemporalFastLEDDemo, PackedBFIMapDemo, LoadPrecomputedDemo
+Target: **Teensy 4.0 (IMXRT1062) — 1984 KB Flash, 512 KB RAM1, 512 KB RAM2**<br>Environments: HyperTeensy, Calibration, FrameworkDemo, RGB16InputDemo, ColorCalibrationABDemo, PrecomputeDemo, rgbwNoExtractionDemo, True16RGBWGradientDemo, TemporalFastLEDDemo, RGBW_Analytical_FastLED, PackedBFIMapDemo, LoadPrecomputedDemo
 
 Target: **Teensy 4.1 (IMXRT1062) — 7936 KB Flash, 512 KB RAM1, 512 KB RAM2, PSRAM + QSPI pads**<br>Environments: CubeLUT3DDemo
 

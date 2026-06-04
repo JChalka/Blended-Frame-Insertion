@@ -50,8 +50,8 @@ def _report_path():
 ENV_ORDER = [
     "HyperTeensy", "Calibration", "FrameworkDemo", "RGB16InputDemo",
     "ColorCalibrationABDemo", "PrecomputeDemo", "rgbwNoExtractionDemo",
-    "True16RGBWGradientDemo", "TemporalFastLEDDemo", "PackedBFIMapDemo",
-    "CubeLUT3DDemo",
+    "True16RGBWGradientDemo", "TemporalFastLEDDemo", "RGBW_Analytical_FastLED",
+    "PackedBFIMapDemo", "CubeLUT3DDemo", "ESP32S3_DoubleBuffer",
 ]
 
 # Board metadata for summary line.
@@ -464,12 +464,9 @@ def _pio_post_build(target, source, env):
     board_id = env.BoardConfig().id
     platform_name = env.PioPlatform().name  # e.g. "espressif32", "teensy"
 
-    print(f"[build_report] hook fired: env={env_name} platform={platform_name} board={board_id} elf={elf_path}")
-
     if platform_name in ESP_PLATFORMS:
         sizes = _run_esp32_size(env)
         sizes.setdefault("arch", "esp32")
-        print(f"[build_report] ESP32 sizes: {sizes}")
     else:
         tool_dir = env.PioPlatform().get_package_dir("tool-teensy") or ""
         exe_name = "teensy_size.exe" if sys.platform == "win32" else "teensy_size"
