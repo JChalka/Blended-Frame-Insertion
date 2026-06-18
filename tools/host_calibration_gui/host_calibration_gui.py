@@ -24,7 +24,7 @@ import serial.tools.list_ports
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-APP_TITLE = "Temporal RGBW Calibration Host v7.5.3"
+APP_TITLE = "Temporal RGBW Calibration Host v7.5.4"
 DEFAULT_SERIAL_BAUD = 30000000
 DEFAULT_ARTIFACT_DIR = Path(__file__).resolve().parent / "captures"
 FRAME_HEADER = b"TCAL"
@@ -49,6 +49,7 @@ OP_SET_SOLVER_ENABLED = 0x29
 OP_SET_TEMPORAL_BLEND = 0x2A
 OP_SET_FILL16 = 0x2B
 OP_SET_ANALYTICAL_RGB16 = 0x2C
+OP_GET_DIODE_PROFILE = 0x2D
 
 PHASE_MODE_AUTO = 0
 PHASE_MODE_MANUAL = 1
@@ -58,6 +59,17 @@ ANALYTICAL_MODEL_LP_LEGACY = 1
 ANALYTICAL_MODEL_CHOICES = {
     "sub-gamut": ANALYTICAL_MODEL_SUB_GAMUT,
     "lp_legacy": ANALYTICAL_MODEL_LP_LEGACY,
+}
+DUAL_EDGE_POLICY_Y_CORRECT_CLIP = 0
+DUAL_EDGE_POLICY_ROLLOFF_AFTER_CLIP = 1
+DUAL_EDGE_POLICY_SCALE_TO_FULL_ENDPOINT = 2
+DUAL_EDGE_POLICY_CHOICES = {
+    "y_correct_clip": DUAL_EDGE_POLICY_Y_CORRECT_CLIP,
+    "rolloff_after_clip": DUAL_EDGE_POLICY_ROLLOFF_AFTER_CLIP,
+    "scale_to_full_endpoint": DUAL_EDGE_POLICY_SCALE_TO_FULL_ENDPOINT,
+}
+DUAL_EDGE_POLICY_NAMES = {
+    value: key for key, value in DUAL_EDGE_POLICY_CHOICES.items()
 }
 ANALYTICAL_SOLVE_PATHS = {
     0: "none",
@@ -167,6 +179,7 @@ def _spotread_command_with_one_shot(command: str) -> str:
         return _format_command_for_log(_spotread_args_with_one_shot(command))
     except Exception:
         return (command or DEFAULT_SPOTREAD_COMMAND).strip() or DEFAULT_SPOTREAD_COMMAND
+
 
 # ---------------------------------------------------------------------------
 # LUT Verifier — built-in named patch set + programmatic grid generator
@@ -418,6 +431,18 @@ _VERIFIER_GAMUT_PRIMARIES: dict[str, dict[str, tuple[float, float]]] = {
 _VERIFIER_GAMUT_CHOICES = ["summary/native", "rec709", "rec2020", "dci-p3", "adobe-rgb"]
 _VERIFIER_TRANSFER_CHOICES = ["linear", "gamut"]
 _VERIFIER_INTERPOLATION_CHOICES = ["tetrahedral", "trilinear"]
+
+# Reference-white presets used by verifier Lab/xy chroma dE and model-style
+# named-gamut projection. ``Summary/default`` uses the loaded LUT summary when
+# available and falls back to D65 otherwise. ``Custom`` uses the editable x/y
+# fields in the verifier UI.
+_VERIFIER_REFERENCE_WHITE_PRESETS: dict[str, tuple[float, float] | None] = {
+    "Summary/default": None,
+    "D65": (0.3127, 0.3290),
+    "DCI white": (0.3140, 0.3510),
+    "E / equal-energy": (1.0 / 3.0, 1.0 / 3.0),
+    "Custom": None,
+}
 
 
 def _xy_to_xyz1_tuple(xy: tuple[float, float]) -> np.ndarray:
@@ -715,6 +740,54 @@ def _xy_chroma_de(
     return math.sqrt((ma - ea) ** 2 + (mb - eb) ** 2)
 
 
+def _u32_be_from_payload(payload: bytes | bytearray, offset: int) -> int:
+    return ((int(payload[offset]) << 24) |
+            (int(payload[offset + 1]) << 16) |
+            (int(payload[offset + 2]) << 8) |
+            int(payload[offset + 3]))
+
+
+def _decode_diode_profile_payload(payload: bytes | bytearray) -> dict[str, object] | None:
+    """Decode Teensy DiodeProfile payloads returned by OP_GET_DIODE_PROFILE.
+
+    Supported layouts:
+      compact:  [op,status,'D','P','R','F',version,format,12x u32be q1e6]
+      extended: normal 51-byte cal response followed by the same DPRF block
+    """
+    data = bytes(payload)
+    magic_offset: int | None = None
+    for off in (2, 51):
+        if len(data) >= off + 8 and data[off:off + 4] == b"DPRF":
+            magic_offset = off
+            break
+    if magic_offset is None:
+        return None
+    version = int(data[magic_offset + 4])
+    fmt = int(data[magic_offset + 5])
+    if version != 1 or fmt != 1:
+        return None
+    values_offset = magic_offset + 6
+    if len(data) < values_offset + 48:
+        return None
+    primaries_xy: dict[str, list[float]] = {}
+    relative_y: dict[str, float] = {}
+    off = values_offset
+    for ch in "RGBW":
+        x = _u32_be_from_payload(data, off) / 1000000.0; off += 4
+        y = _u32_be_from_payload(data, off) / 1000000.0; off += 4
+        rel_y = _u32_be_from_payload(data, off) / 1000000.0; off += 4
+        primaries_xy[ch] = [float(x), float(y)]
+        relative_y[ch] = float(rel_y)
+    return {
+        "version": version,
+        "format": "u32be_q1e6",
+        "primaries_xy": primaries_xy,
+        "relative_y": relative_y,
+        "channel_order": list("RGBW"),
+        "source": "teensy_diode_profile",
+    }
+
+
 @dataclass
 class MeasurementPlanRow:
     name: str
@@ -898,7 +971,7 @@ class DirectSerialClient:
                 msg["analytical_model"] = payload[32]
             if len(payload) >= 34:
                 msg["analytical_solve_path"] = payload[33]
-            if len(payload) >= 51:
+            if len(payload) >= 51 and msg.get("op") != OP_GET_DIODE_PROFILE:
                 msg["analytical_strict_ok"] = payload[34]
                 msg["analytical_strict_rgbw16"] = [
                     (payload[35] << 8) | payload[36],
@@ -912,8 +985,17 @@ class DirectSerialClient:
                     (payload[47] << 8) | payload[48],
                     (payload[49] << 8) | payload[50],
                 ]
+            if len(payload) >= 52 and msg.get("op") != OP_GET_DIODE_PROFILE:
+                msg["analytical_dual_edge_policy"] = payload[51]
+            if msg.get("op") == OP_GET_DIODE_PROFILE:
+                diode_profile = _decode_diode_profile_payload(payload)
+                if diode_profile is not None:
+                    msg["diode_profile"] = diode_profile
             if msg["op"] is not None and msg["status"] is not None:
-                self._log(f"[rx] cal op=0x{msg['op']:02X} status=0x{msg['status']:02X} phase={msg['phase']}")
+                if msg.get("op") == OP_GET_DIODE_PROFILE and "diode_profile" in msg:
+                    self._log(f"[rx] diode profile status=0x{msg['status']:02X}")
+                else:
+                    self._log(f"[rx] cal op=0x{msg['op']:02X} status=0x{msg['status']:02X} phase={msg['phase']}")
             else:
                 self._log(f"[rx] cal payload={payload.hex()}")
         else:
@@ -1156,8 +1238,8 @@ class ArgyllRunner:
                 except Exception:
                     stdout = stdout or ""
                     stderr = stderr or ""
-            except Exception as exc:
-                stderr = (stderr or "") + f"\n[host] communicate after terminate failed: {exc}"
+            except Exception:
+                stderr = (stderr or "") + "\n[host] communicate after terminate failed"
         finally:
             with self.lock:
                 if self.active_proc is proc:
@@ -1239,7 +1321,6 @@ class ArgyllRunner:
         time.sleep(0.75)
         return result
 
-
 class App:
     def __init__(self, root):
         self.root = root
@@ -1278,9 +1359,14 @@ class App:
         self._verifier_interp_var = tk.StringVar(value="tetrahedral")
         self._verifier_output_source_var = tk.StringVar(value=VERIFIER_OUTPUT_SOURCES[0])
         self._verifier_analytical_model_var = tk.StringVar(value="sub-gamut")
+        self._verifier_dual_edge_policy_var = tk.StringVar(value="y_correct_clip")
         self._verifier_gamut_var = tk.StringVar(value="summary/native")
         self._verifier_transfer_var = tk.StringVar(value="linear")
         self._verifier_project_hull_var = tk.BooleanVar(value=True)
+        self._verifier_ref_white_preset_var = tk.StringVar(value="D65")
+        self._verifier_ref_white_x_var = tk.DoubleVar(value=_VERIFIER_D65_XY[0])
+        self._verifier_ref_white_y_var = tk.DoubleVar(value=_VERIFIER_D65_XY[1])
+        self._verifier_auto_measure_basis_var = tk.BooleanVar(value=True)
         self.build_ui()
         self.refresh_serial_ports()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -2574,8 +2660,27 @@ class App:
         sum_row = ttk.Frame(box)
         sum_row.pack(fill="x", pady=2)
         ttk.Button(sum_row, text="Load Summary (.json)", command=self._load_verifier_summary).pack(side="left", padx=4)
-        self._verifier_summary_label = tk.StringVar(value="no summary loaded  (expected xy unavailable)")
+        self._verifier_summary_label = tk.StringVar(value="no summary loaded  (will auto-measure RGBW basis if enabled)")
         ttk.Label(sum_row, textvariable=self._verifier_summary_label, anchor="w").pack(side="left", padx=4, fill="x", expand=True)
+
+        ref_row = ttk.Frame(box)
+        ref_row.pack(fill="x", pady=2)
+        ttk.Label(ref_row, text="Reference white:").pack(side="left", padx=(4, 2))
+        ref_cb = ttk.Combobox(
+            ref_row, textvariable=self._verifier_ref_white_preset_var,
+            values=list(_VERIFIER_REFERENCE_WHITE_PRESETS.keys()),
+            state="readonly", width=17,
+        )
+        ref_cb.pack(side="left", padx=2)
+        ref_cb.bind("<<ComboboxSelected>>", lambda _evt: self._verifier_update_reference_white_fields())
+        ttk.Label(ref_row, text="x").pack(side="left", padx=(10, 2))
+        ttk.Entry(ref_row, textvariable=self._verifier_ref_white_x_var, width=8).pack(side="left", padx=2)
+        ttk.Label(ref_row, text="y").pack(side="left", padx=(6, 2))
+        ttk.Entry(ref_row, textvariable=self._verifier_ref_white_y_var, width=8).pack(side="left", padx=2)
+        ttk.Button(ref_row, text="Apply preset", command=self._verifier_update_reference_white_fields).pack(side="left", padx=4)
+        ttk.Checkbutton(ref_row, text="Auto-measure RGBW basis if summary missing", variable=self._verifier_auto_measure_basis_var).pack(side="left", padx=(12, 2))
+        ttk.Button(ref_row, text="Fetch Teensy DiodeProfile", command=self.fetch_teensy_diode_profile_async).pack(side="left", padx=4)
+        ttk.Button(ref_row, text="Measure diode basis now", command=self.measure_verifier_basis_async).pack(side="left", padx=4)
 
         # ── Options / actions ───────────────────────────────────────────────
         opt_row = ttk.Frame(box)
@@ -2613,6 +2718,13 @@ class App:
             state="readonly", width=10,
         )
         model_cb.pack(side="left", padx=2)
+        ttk.Label(opt_row, text="Dual edge:").pack(side="left", padx=(12, 2))
+        dual_edge_cb = ttk.Combobox(
+            opt_row, textvariable=self._verifier_dual_edge_policy_var,
+            values=list(DUAL_EDGE_POLICY_CHOICES.keys()),
+            state="readonly", width=20,
+        )
+        dual_edge_cb.pack(side="left", padx=2)
         ttk.Label(opt_row, text="Target gamut:").pack(side="left", padx=(12, 2))
         gamut_cb = ttk.Combobox(
             opt_row, textvariable=self._verifier_gamut_var,
@@ -2747,19 +2859,314 @@ class App:
             ).strip().lower()
             if summary_interp in _VERIFIER_INTERPOLATION_CHOICES:
                 self._verifier_interp_var.set(summary_interp)
+            self._verifier_update_reference_white_fields()
             self.log_queue.put(
                 f"[verifier] loaded summary: {path}  "
                 f"gamut={self._verifier_gamut_var.get()}  "
                 f"transfer={self._verifier_transfer_var.get()}  "
-                f"interp={self._verifier_interp_var.get()}"
+                f"interp={self._verifier_interp_var.get()}  "
+                f"ref_white=({self._verifier_ref_white()[0]:.4f},{self._verifier_ref_white()[1]:.4f})"
             )
         except Exception as exc:
             messagebox.showerror("Load summary failed", str(exc))
 
+    def _summary_reference_white_xy(self) -> tuple[float, float] | None:
+        """Reference white from loaded summary, or None when unavailable/invalid."""
+        try:
+            ref_xy = self.verifier_summary.get("basis_sanity", {}).get("reference_white_xy")
+            if ref_xy is None:
+                ref_xy = self.verifier_summary.get("reference_white_xy")
+            if ref_xy is None or len(ref_xy) < 2:
+                return None
+            x = float(ref_xy[0])
+            y = float(ref_xy[1])
+            if not (math.isfinite(x) and math.isfinite(y) and x > 0 and y > 0 and x + y < 1.0):
+                return None
+            return x, y
+        except Exception:
+            return None
+
+    def _verifier_update_reference_white_fields(self) -> None:
+        """Apply selected reference-white preset to the editable xy fields."""
+        preset = self._verifier_ref_white_preset_var.get()
+        if preset == "Custom":
+            return
+        xy = None
+        if preset == "Summary/default":
+            xy = self._summary_reference_white_xy()
+            if xy is None:
+                xy = _VERIFIER_D65_XY
+        else:
+            xy = _VERIFIER_REFERENCE_WHITE_PRESETS.get(preset)
+        if xy is None:
+            xy = _VERIFIER_D65_XY
+        try:
+            self._verifier_ref_white_x_var.set(float(xy[0]))
+            self._verifier_ref_white_y_var.set(float(xy[1]))
+        except Exception:
+            self._verifier_ref_white_x_var.set(_VERIFIER_D65_XY[0])
+            self._verifier_ref_white_y_var.set(_VERIFIER_D65_XY[1])
+
     def _verifier_ref_white(self) -> tuple[float, float]:
-        """Reference white (x, y) from the loaded summary, or D65 fallback."""
-        ref_xy = self.verifier_summary.get("basis_sanity", {}).get("reference_white_xy", [0.3127, 0.3290])
-        return float(ref_xy[0]), float(ref_xy[1])
+        """Reference white (x, y) from verifier UI, summary, or D65 fallback."""
+        preset = self._verifier_ref_white_preset_var.get()
+        if preset == "Summary/default":
+            summary_xy = self._summary_reference_white_xy()
+            if summary_xy is not None:
+                return summary_xy
+        elif preset != "Custom":
+            xy = _VERIFIER_REFERENCE_WHITE_PRESETS.get(preset)
+            if xy is not None:
+                return float(xy[0]), float(xy[1])
+        try:
+            x = float(self._verifier_ref_white_x_var.get())
+            y = float(self._verifier_ref_white_y_var.get())
+            if math.isfinite(x) and math.isfinite(y) and x > 0 and y > 0 and x + y < 1.0:
+                return x, y
+        except Exception:
+            pass
+        return _VERIFIER_D65_XY
+
+    def _verifier_has_rgbw_basis(self) -> bool:
+        basis_data = self.verifier_summary.get("basis_xyz_per_q16", {}) if isinstance(self.verifier_summary, dict) else {}
+        return all(k in basis_data for k in ("r16", "g16", "b16", "w16"))
+
+    def _measurement_result_to_xyz(self, result: dict[str, object]) -> np.ndarray | None:
+        """Extract XYZ from spotread result, accepting either XYZ or xyY output."""
+        try:
+            xyz_obj = result.get("XYZ")
+            if isinstance(xyz_obj, dict):
+                X = float(xyz_obj["X"])
+                Y = float(xyz_obj["Y"])
+                Z = float(xyz_obj["Z"])
+                if all(math.isfinite(v) for v in (X, Y, Z)) and Y > 0:
+                    return np.array([X, Y, Z], dtype=float)
+            if all(k in result for k in ("X", "Z")) and ("Y_from_XYZ" in result or "Y" in result):
+                X = float(result["X"])
+                Y = float(result.get("Y_from_XYZ", result.get("Y")))
+                Z = float(result["Z"])
+                if all(math.isfinite(v) for v in (X, Y, Z)) and Y > 0:
+                    return np.array([X, Y, Z], dtype=float)
+            xyY_obj = result.get("xyY")
+            if isinstance(xyY_obj, dict):
+                x = float(xyY_obj["x"])
+                y = float(xyY_obj["y"])
+                Y = float(xyY_obj["Y"])
+                xyz = _verifier_xyY_to_XYZ((x, y), Y)
+                if float(xyz[1]) > 0:
+                    return xyz
+            if all(k in result for k in ("x", "y", "Y")):
+                xyz = _verifier_xyY_to_XYZ((float(result["x"]), float(result["y"])), float(result["Y"]))
+                if float(xyz[1]) > 0:
+                    return xyz
+        except Exception:
+            return None
+        return None
+
+    def _render_verifier_basis_channel(self, ch: str) -> None:
+        values = {"R": 0, "G": 0, "B": 0, "W": 0}
+        values[ch] = 65535
+        payload = bytearray([OP_SET_FILL16])
+        for c in "RGBW":
+            payload.extend(self._pack_u16(values[c]))
+        self.device.send_frame(KIND_CAL_REQ, bytes(payload))
+        time.sleep(float(self.settle_delay_var.get()))
+        self.device.send_frame(KIND_CAL_REQ, bytes([OP_COMMIT]))
+        time.sleep(float(self.settle_delay_var.get()))
+
+    def fetch_teensy_diode_profile_async(self) -> None:
+        if self.verifier_running:
+            messagebox.showinfo("LUT Verifier", "Stop the active verification before fetching the Teensy DiodeProfile.")
+            return
+        if not self.device.is_connected():
+            messagebox.showerror("LUT Verifier", "Connect the Teensy device first.")
+            return
+
+        def worker() -> None:
+            try:
+                self.root.after(0, lambda: self._verifier_status_var.set("fetching Teensy DiodeProfile"))
+                self._fetch_teensy_diode_profile_basis()
+                self.root.after(0, lambda: self._verifier_status_var.set("Teensy DiodeProfile loaded"))
+            except Exception as exc:
+                self.log_queue.put(f"[verifier] Teensy DiodeProfile fetch failed: {exc}")
+                self.root.after(0, lambda e=str(exc): messagebox.showerror("Fetch Teensy DiodeProfile failed", e))
+                self.root.after(0, lambda: self._verifier_status_var.set("DiodeProfile fetch failed"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _fetch_teensy_diode_profile_basis(self) -> dict[str, np.ndarray]:
+        """Fetch the compiled FastLED DiodeProfile from the connected Teensy."""
+        msg = self._send_cal_request_wait(bytes([OP_GET_DIODE_PROFILE]), OP_GET_DIODE_PROFILE, timeout_s=2.0)
+        if msg is None:
+            raise RuntimeError("no response to OP_GET_DIODE_PROFILE")
+        if int(msg.get("status", 255)) != 0:
+            raise RuntimeError(f"Teensy returned status={msg.get('status')} for OP_GET_DIODE_PROFILE")
+        profile = msg.get("diode_profile")
+        if not isinstance(profile, dict):
+            raise RuntimeError("Teensy response did not include a DiodeProfile payload; update the FastLED verifier sketch")
+        primaries_xy = profile.get("primaries_xy")
+        relative_y = profile.get("relative_y")
+        if not isinstance(primaries_xy, dict) or not isinstance(relative_y, dict):
+            raise RuntimeError("malformed Teensy DiodeProfile payload")
+
+        basis: dict[str, np.ndarray] = {}
+        clean_xy: dict[str, list[float]] = {}
+        max_y: dict[str, float] = {}
+        for ch in "RGBW":
+            xy = primaries_xy[ch]
+            x = float(xy[0])
+            y = float(xy[1])
+            rel_y = float(relative_y[ch])
+            if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(rel_y) and y > 0.0 and rel_y > 0.0):
+                raise RuntimeError(f"invalid Teensy DiodeProfile basis for {ch}: xy=({x},{y}) Y={rel_y}")
+            clean_xy[ch] = [x, y]
+            max_y[ch] = rel_y
+            basis[ch] = _verifier_xyY_to_XYZ((x, y), rel_y)
+
+        ref_x, ref_y = self._verifier_ref_white()
+        self.verifier_summary = {
+            "basis_xyz_per_q16": {
+                "r16": basis["R"].tolist(),
+                "g16": basis["G"].tolist(),
+                "b16": basis["B"].tolist(),
+                "w16": basis["W"].tolist(),
+            },
+            "basis_sanity": {
+                "reference_white_xy": [float(ref_x), float(ref_y)],
+                "basis_source": "teensy_diode_profile",
+                "basis_units": "relative_Y",
+            },
+            "settings": {
+                "target_white_balance_mode": "reference-white",
+                "input_transfer": self._verifier_transfer_var.get(),
+                "gamut": self._verifier_gamut_var.get(),
+            },
+            "primaries_xy": clean_xy,
+            "max_Y": max_y,
+            "reference_white_xy": [float(ref_x), float(ref_y)],
+            "generated_by": "host_calibration_gui_teensy_diode_profile",
+            "generated_at": time.time(),
+        }
+        basis_label = (
+            "Teensy DiodeProfile RGBW basis  "
+            f"R=({clean_xy['R'][0]:.4f},{clean_xy['R'][1]:.4f}) "
+            f"G=({clean_xy['G'][0]:.4f},{clean_xy['G'][1]:.4f}) "
+            f"B=({clean_xy['B'][0]:.4f},{clean_xy['B'][1]:.4f}) "
+            f"W=({clean_xy['W'][0]:.4f},{clean_xy['W'][1]:.4f})"
+        )
+        self.root.after(0, lambda label=basis_label: self._verifier_summary_label.set(label))
+        self.log_queue.put(
+            "[verifier] Teensy DiodeProfile basis loaded: "
+            + " ".join(f"{ch}=({clean_xy[ch][0]:.5f},{clean_xy[ch][1]:.5f}) relY={max_y[ch]:.6f}" for ch in "RGBW")
+        )
+        return basis
+
+    def measure_verifier_basis_async(self) -> None:
+        if self.verifier_running:
+            messagebox.showinfo("LUT Verifier", "Stop the active verification before measuring the diode basis.")
+            return
+        if not self.device.is_connected():
+            messagebox.showerror("LUT Verifier", "Connect the Teensy device first.")
+            return
+
+        def worker() -> None:
+            try:
+                self.root.after(0, lambda: self._verifier_status_var.set("measuring RGBW diode basis"))
+                self._measure_verifier_rgbw_basis()
+                self.root.after(0, lambda: self._verifier_status_var.set("basis measured"))
+            except Exception as exc:
+                self.log_queue.put(f"[verifier] diode basis measurement failed: {exc}")
+                self.root.after(0, lambda e=str(exc): messagebox.showerror("Measure diode basis failed", e))
+                self.root.after(0, lambda: self._verifier_status_var.set("basis measurement failed"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _measure_verifier_rgbw_basis(self) -> dict[str, np.ndarray]:
+        """Measure full-drive R/G/B/W and install them as verifier fallback basis."""
+        basis: dict[str, np.ndarray] = {}
+        basis_xy: dict[str, list[float]] = {}
+        max_y: dict[str, float] = {}
+        command = self._spotread_command_for_request({"measurement_format": "xyzxy"})
+
+        for ch in "RGBW":
+            if self.verifier_stop_event.is_set():
+                raise RuntimeError("basis measurement stopped")
+            self.log_queue.put(f"[verifier] measuring fallback diode basis {ch}=65535")
+            self.root.after(0, lambda c=ch: self._verifier_status_var.set(f"measuring diode basis {c}"))
+            self._render_verifier_basis_channel(ch)
+            result = self.argyll.run_spotread(
+                command,
+                timeout_s=float(self.timeout_var.get()),
+                send_trigger_newline=bool(self.send_newline_var.get()),
+                cleanup_first=bool(self.cleanup_first_var.get()),
+            )
+            if not result.get("ok"):
+                raise RuntimeError(f"spotread failed while measuring {ch} basis")
+            xyz = self._measurement_result_to_xyz(result)
+            if xyz is None:
+                raise RuntimeError(f"could not parse XYZ/xyY for {ch} basis")
+            basis[ch] = xyz
+            xy = _verifier_xyz_to_xy_tuple(xyz)
+            if xy is None:
+                raise RuntimeError(f"invalid xy for {ch} basis")
+            basis_xy[ch] = [float(xy[0]), float(xy[1])]
+            max_y[ch] = float(xyz[1])
+            self.last_measurement = result
+            self.root.after(0, lambda res=result: self.measurement_text.set(
+                f"last basis measurement: Y={res.get('Y')} x={res.get('x')} y={res.get('y')}"
+            ))
+
+        ref_x, ref_y = self._verifier_ref_white()
+        self.verifier_summary = {
+            "basis_xyz_per_q16": {
+                "r16": basis["R"].tolist(),
+                "g16": basis["G"].tolist(),
+                "b16": basis["B"].tolist(),
+                "w16": basis["W"].tolist(),
+            },
+            "basis_sanity": {
+                "reference_white_xy": [float(ref_x), float(ref_y)],
+                "basis_source": "verifier_full_drive_spotread",
+            },
+            "settings": {
+                "target_white_balance_mode": "reference-white",
+                "input_transfer": self._verifier_transfer_var.get(),
+                "gamut": self._verifier_gamut_var.get(),
+            },
+            "primaries_xy": basis_xy,
+            "max_Y": max_y,
+            "generated_by": "host_calibration_gui_verifier_fallback_basis",
+            "generated_at": time.time(),
+        }
+        basis_label = (
+            "measured fallback RGBW basis  "
+            f"R=({basis_xy['R'][0]:.4f},{basis_xy['R'][1]:.4f}) "
+            f"G=({basis_xy['G'][0]:.4f},{basis_xy['G'][1]:.4f}) "
+            f"B=({basis_xy['B'][0]:.4f},{basis_xy['B'][1]:.4f}) "
+            f"W=({basis_xy['W'][0]:.4f},{basis_xy['W'][1]:.4f})"
+        )
+        self.root.after(0, lambda label=basis_label: self._verifier_summary_label.set(label))
+        self.log_queue.put(
+            "[verifier] fallback basis measured: "
+            + " ".join(f"{ch}=({basis_xy[ch][0]:.5f},{basis_xy[ch][1]:.5f}) Y={max_y[ch]:.3f}" for ch in "RGBW")
+        )
+        return basis
+
+    def _ensure_verifier_basis_for_expected_xy(self) -> None:
+        """Fetch or measure RGBW basis when no summary/basis is available."""
+        if self._verifier_has_rgbw_basis():
+            return
+        if self.device.is_connected():
+            try:
+                self.log_queue.put("[verifier] no RGBW summary basis available; fetching Teensy DiodeProfile")
+                self._fetch_teensy_diode_profile_basis()
+                return
+            except Exception as exc:
+                self.log_queue.put(f"[verifier] Teensy DiodeProfile fallback unavailable: {exc}")
+        if not bool(self._verifier_auto_measure_basis_var.get()):
+            return
+        self.log_queue.put("[verifier] no RGBW summary/profile basis available; auto-measuring full-drive R/G/B/W")
+        self._measure_verifier_rgbw_basis()
 
     def _verifier_expected_xy_from_summary(self, r16: int, g16: int, b16: int) -> tuple[float, float] | None:
         """Legacy/native expected xy derived from lut_summary basis."""
@@ -2931,6 +3338,7 @@ class App:
         def worker() -> None:
             self.verifier_running = True
             de_threshold = float(self._verifier_de_var.get())
+            self._ensure_verifier_basis_for_expected_xy()
             ref_x, ref_y = self._verifier_ref_white()
             patches = _generate_verifier_patches(self._verifier_preset_var.get())
             total = len(patches)
@@ -2944,7 +3352,9 @@ class App:
 
                     output_source = self._verifier_output_source_var.get()
                     analytical_model = self._verifier_analytical_model_var.get()
+                    analytical_dual_edge_policy = self._verifier_dual_edge_policy_var.get()
                     using_lut_row = output_source == VERIFIER_OUTPUT_SOURCES[0]
+                    interpolation_mode = self._verifier_interp_var.get() if using_lut_row else "disabled"
                     cal_msg: dict[str, object] = {}
                     solve_path = ""
                     strict_tuple = None
@@ -2955,9 +3365,14 @@ class App:
                         lr, lg, lb, lw = _lut_lookup(self.verifier_lut, r16, g16, b16, self._verifier_interp_var.get())  # type: ignore[arg-type]
                     else:
                         model_id = ANALYTICAL_MODEL_CHOICES.get(analytical_model, ANALYTICAL_MODEL_SUB_GAMUT)
+                        dual_edge_policy_id = DUAL_EDGE_POLICY_CHOICES.get(
+                            analytical_dual_edge_policy,
+                            DUAL_EDGE_POLICY_Y_CORRECT_CLIP,
+                        )
                         payload = bytearray([OP_SET_ANALYTICAL_RGB16, model_id & 0xFF])
                         for v in [r16, g16, b16]:
                             payload.extend(self._pack_u16(v))
+                        payload.append(dual_edge_policy_id & 0xFF)
                         cal_msg = self._send_cal_request_wait(bytes(payload), OP_SET_ANALYTICAL_RGB16, timeout_s=1.5)
                         if not isinstance(cal_msg, dict) or cal_msg.get("status") != 0:
                             status = cal_msg.get("status") if isinstance(cal_msg, dict) else None
@@ -2968,6 +3383,10 @@ class App:
                         else:
                             raise RuntimeError("analytical MCU response did not include solved_rgbw16")
                         solve_path = ANALYTICAL_SOLVE_PATHS.get(int(cal_msg.get("analytical_solve_path", -1)), "unknown")
+                        analytical_dual_edge_policy = DUAL_EDGE_POLICY_NAMES.get(
+                            int(cal_msg.get("analytical_dual_edge_policy", dual_edge_policy_id)),
+                            analytical_dual_edge_policy,
+                        )
                         strict_tuple = cal_msg.get("analytical_strict_rgbw16")
                         lp_tuple = cal_msg.get("analytical_lp_rgbw16")
                     w_total = lr + lg + lb + lw
@@ -3043,6 +3462,7 @@ class App:
                         "lut_r16": lr, "lut_g16": lg, "lut_b16": lb, "lut_w16": lw,
                         "output_source": output_source,
                         "analytical_model": analytical_model if not using_lut_row else "",
+                        "analytical_dual_edge_policy": analytical_dual_edge_policy if not using_lut_row else "",
                         "analytical_solve_path": solve_path if not using_lut_row else "",
                         "analytical_strict_ok": cal_msg.get("analytical_strict_ok") if not using_lut_row else None,
                         "analytical_strict_rgbw16": "/".join(str(int(v)) for v in strict_tuple) if isinstance(strict_tuple, list) else "",
@@ -3064,10 +3484,13 @@ class App:
                         "dE":       de_val,
                         "ok":       ok_str,
                         "tag":      tag,
-                        "interpolation": self._verifier_interp_var.get(),
+                        "interpolation": interpolation_mode,
                         "expected_gamut": self._verifier_gamut_var.get(),
                         "verification_gamut": self._verifier_gamut_var.get(),
                         "input_transfer": self._verifier_transfer_var.get(),
+                        "reference_white_x": ref_x,
+                        "reference_white_y": ref_y,
+                        "reference_white_preset": self._verifier_ref_white_preset_var.get(),
                     }
                     self.verifier_results.append(row_data)
                     self.last_measurement = result
@@ -3110,13 +3533,15 @@ class App:
                         f"[verifier] {idx + 1}/{total} {name}: "
                         f"source={output_source} "
                         f"model={analytical_model if not using_lut_row else 'lut'} "
+                        f"dual_edge={analytical_dual_edge_policy if not using_lut_row else 'n/a'} "
                         f"path={row_data.get('analytical_solve_path', '') if not using_lut_row else 'lut'} "
                         f"strict={row_data.get('analytical_strict_rgbw16', '') if not using_lut_row else ''} "
                         f"lp={row_data.get('analytical_lp_rgbw16', '') if not using_lut_row else ''} "
-                        f"interp={self._verifier_interp_var.get()} "
+                        f"interp={interpolation_mode} "
                         f"gamut={self._verifier_gamut_var.get()} "
                         f"transfer={self._verifier_transfer_var.get()} "
                         f"project_hull={int(self._verifier_project_hull_var.get())} "
+                        f"ref=({ref_x:.4f},{ref_y:.4f}) "
                         f"W={lw} ({w_pct:.1f}%)  {xy_str}{de_str}  [{ok_str}]"
                     )
 
@@ -3133,9 +3558,12 @@ class App:
                     summary = (f"{len(self.verifier_results)} patches measured"
                                f"  |  {self._verifier_output_source_var.get()}  "
                                f"{self._verifier_analytical_model_var.get() if self._verifier_output_source_var.get() != VERIFIER_OUTPUT_SOURCES[0] else self._verifier_interp_var.get()}  "
+                               f"{self._verifier_dual_edge_policy_var.get() if self._verifier_output_source_var.get() != VERIFIER_OUTPUT_SOURCES[0] else ''}  "
+                               f"{'disabled' if self._verifier_output_source_var.get() != VERIFIER_OUTPUT_SOURCES[0] else ''}  "
                                f"{self._verifier_gamut_var.get()}  "
                                f"{self._verifier_transfer_var.get()}  "
-                               f"project_hull={int(self._verifier_project_hull_var.get())}"
+                               f"project_hull={int(self._verifier_project_hull_var.get())} "
+                               f"ref=({self._verifier_ref_white()[0]:.4f},{self._verifier_ref_white()[1]:.4f})"
                                f" projected={n_projected}")
                     if n_ref > 0:
                         summary += (f"  |  {n_pass} pass / {n_fail} fail"
@@ -3171,6 +3599,7 @@ class App:
             "patch", "r16", "g16", "b16",
             "lut_r16", "lut_g16", "lut_b16", "lut_w16", "w_pct",
             "output_source", "analytical_model",
+            "analytical_dual_edge_policy",
             "analytical_solve_path",
             "analytical_strict_ok", "analytical_strict_rgbw16", "analytical_lp_rgbw16",
             "mcu_solved_r16", "mcu_solved_g16", "mcu_solved_b16", "mcu_solved_w16",
@@ -3181,6 +3610,7 @@ class App:
             "exp_project_hull_enabled", "expected_hull_xy",
             "dE", "ok",
             "interpolation", "expected_gamut", "verification_gamut", "input_transfer",
+            "reference_white_x", "reference_white_y", "reference_white_preset",
         ]
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
