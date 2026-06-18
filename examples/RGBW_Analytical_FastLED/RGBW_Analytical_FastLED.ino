@@ -45,10 +45,14 @@
 #define OP_SET_TEMPORAL_BLEND 0x2A
 #define OP_SET_FILL16 0x2B
 #define OP_SET_ANALYTICAL_RGB16 0x2C
+#define OP_GET_DIODE_PROFILE 0x2D
 #define PHASE_MODE_AUTO 0x00
 #define PHASE_MODE_MANUAL 0x01
 #define ANALYTICAL_MODEL_SUB_GAMUT 0x00
 #define ANALYTICAL_MODEL_LP_LEGACY 0x01
+#define DUAL_EDGE_POLICY_Y_CORRECT_CLIP 0x00
+#define DUAL_EDGE_POLICY_ROLLOFF_AFTER_CLIP 0x01
+#define DUAL_EDGE_POLICY_SCALE_TO_FULL_ENDPOINT 0x02
 #define ANALYTICAL_SOLVE_NONE 0x00
 #define ANALYTICAL_SOLVE_STRICT_SUB_GAMUT 0x01
 #define ANALYTICAL_SOLVE_LP_LEGACY 0x02
@@ -72,6 +76,7 @@ bool manualPhaseMode = false;
 bool solverEnabled = false;
 uint8_t analyticalModel = ANALYTICAL_MODEL_SUB_GAMUT;
 uint8_t analyticalSolvePath = ANALYTICAL_SOLVE_NONE;
+uint8_t analyticalDualEdgePolicy = DUAL_EDGE_POLICY_Y_CORRECT_CLIP;
 uint32_t temporalTick = 0;
 ObjectFLED leds(LED_COUNT, displayBuffer, CORDER_GRBW, NUM_PINS, ledPins, 0);
 
@@ -86,15 +91,29 @@ DMAMEM uint8_t solverValueFloorLUT[4][SOLVER_LUT_SIZE] = {0};
 TemporalBFI::SolverRuntime solver;
 fl::colorimetric_detail::ProfileCache analyticalCache;
 
-const fl::DiodeProfile testBenchRgbwProfile = {
-  {0.6853f, 0.3147f},
-  {0.1379f, 0.7480f},
-  {0.1295f, 0.0663f},
-  {0.3299f, 0.3582f},
-  154.670592f / 1543.643989f,
-  566.278306f / 1543.643989f,
-  129.649350f / 1543.643989f,
+static constexpr float DIODE_PROFILE_XY[4][2] = {
+  {0.6872f, 0.3127f},  // R
+  {0.1425f, 0.7452f},  // G
+  {0.1287f, 0.0673f},  // B
+  {0.3299f, 0.3570f},  // W
+};
+static constexpr float DIODE_PROFILE_WHITE_Y = 1497.336789f;
+static constexpr float DIODE_PROFILE_REL_Y[4] = {
+  145.950592f / DIODE_PROFILE_WHITE_Y,
+  552.601306f / DIODE_PROFILE_WHITE_Y,
+  128.05f / DIODE_PROFILE_WHITE_Y,
   1.0f,
+};
+
+const fl::DiodeProfile testBenchRgbwProfile = {
+  {DIODE_PROFILE_XY[0][0], DIODE_PROFILE_XY[0][1]},
+  {DIODE_PROFILE_XY[1][0], DIODE_PROFILE_XY[1][1]},
+  {DIODE_PROFILE_XY[2][0], DIODE_PROFILE_XY[2][1]},
+  {DIODE_PROFILE_XY[3][0], DIODE_PROFILE_XY[3][1]},
+  DIODE_PROFILE_REL_Y[0],
+  DIODE_PROFILE_REL_Y[1],
+  DIODE_PROFILE_REL_Y[2],
+  DIODE_PROFILE_REL_Y[3],
   0,
 };
 
@@ -169,6 +188,18 @@ static inline TemporalTrue16BFIPolicySolver::EncodedState solveTrue16State(uint1
   return solver.solve(valueQ16, channel);
 }
 
+fl::RgbwColorimetricDualEdgePolicy fastLedDualEdgePolicy(uint8_t policy) {
+  switch (policy) {
+    case DUAL_EDGE_POLICY_ROLLOFF_AFTER_CLIP:
+      return fl::RgbwColorimetricDualEdgePolicy::RolloffAfterClip;
+    case DUAL_EDGE_POLICY_SCALE_TO_FULL_ENDPOINT:
+      return fl::RgbwColorimetricDualEdgePolicy::ScaleToFullEndpoint;
+    case DUAL_EDGE_POLICY_Y_CORRECT_CLIP:
+    default:
+      return fl::RgbwColorimetricDualEdgePolicy::YCorrectClip;
+  }
+}
+
 void resetParser() {
   parser.state = DirectFrameState::SYNC0;
   parser.kind = 0;
@@ -209,8 +240,43 @@ static inline void writeU16BE(uint8_t* payload, uint8_t offset, uint16_t value) 
   payload[offset + 1] = value & 0xFF;
 }
 
+static inline void writeU32BE(uint8_t* payload, uint8_t offset, uint32_t value) {
+  payload[offset] = (value >> 24) & 0xFF;
+  payload[offset + 1] = (value >> 16) & 0xFF;
+  payload[offset + 2] = (value >> 8) & 0xFF;
+  payload[offset + 3] = value & 0xFF;
+}
+
+static inline uint32_t q1e6FromFloat(float value) {
+  if (!(value > 0.0f)) return 0u;
+  if (value > 4000.0f) value = 4000.0f;
+  return (uint32_t)(value * 1000000.0f + 0.5f);
+}
+
+void sendDiodeProfileResponse(uint8_t op, uint8_t status) {
+  // Compact profile response:
+  // [op,status,'D','P','R','F',version,format, 12x u32be q1e6]
+  // channel order is R,G,B,W and each channel stores x, y, relative_Y.
+  uint8_t payload[56] = {0};
+  payload[0] = op;
+  payload[1] = status;
+  payload[2] = 'D';
+  payload[3] = 'P';
+  payload[4] = 'R';
+  payload[5] = 'F';
+  payload[6] = 1;  // version
+  payload[7] = 1;  // format: uint32 big-endian values scaled by 1e6
+  uint8_t offset = 8;
+  for (uint8_t i = 0; i < 4; ++i) {
+    writeU32BE(payload, offset, q1e6FromFloat(DIODE_PROFILE_XY[i][0])); offset += 4;
+    writeU32BE(payload, offset, q1e6FromFloat(DIODE_PROFILE_XY[i][1])); offset += 4;
+    writeU32BE(payload, offset, q1e6FromFloat(DIODE_PROFILE_REL_Y[i])); offset += 4;
+  }
+  sendFrame(FRAME_KIND_CAL_RSP, payload, sizeof(payload));
+}
+
 void sendCalResponse(uint8_t op, uint8_t status) {
-  uint8_t payload[51];
+  uint8_t payload[52];
   payload[0] = op;
   payload[1] = status;
   payload[2] = renderEnabled ? 1 : 0;
@@ -247,6 +313,7 @@ void sendCalResponse(uint8_t op, uint8_t status) {
   writeU16BE(payload, 45, lastLpG16);
   writeU16BE(payload, 47, lastLpB16);
   writeU16BE(payload, 49, lastLpW16);
+  payload[51] = analyticalDualEdgePolicy;
   sendFrame(FRAME_KIND_CAL_RSP, payload, sizeof(payload));
 }
 
@@ -346,15 +413,20 @@ void fillAll16(uint16_t r16, uint16_t g16, uint16_t b16, uint16_t w16) {
   applySolvedRGBW16(r16, g16, b16, w16);
 }
 
-bool solveAnalyticalRGB16(uint16_t r16, uint16_t g16, uint16_t b16, uint8_t model, RGBW16Tuple& solved) {
+bool solveAnalyticalRGB16(uint16_t r16, uint16_t g16, uint16_t b16,
+                          uint8_t model, uint8_t dualEdgePolicy,
+                          RGBW16Tuple& solved) {
   const float sR = (float)r16 * (1.0f / 65535.0f);
   const float sG = (float)g16 * (1.0f / 65535.0f);
   const float sB = (float)b16 * (1.0f / 65535.0f);
   float strictRgbw[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   float lpRgbw[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
+  analyticalDualEdgePolicy = dualEdgePolicy;
+  fl::set_rgbw_colorimetric_dual_edge_policy(fastLedDualEdgePolicy(dualEdgePolicy));
+
   lastStrictOk = fl::colorimetric_detail::solve_strict_subgamut(analyticalCache, sR, sG, sB, strictRgbw) ? 1 : 0;
-  fl::colorimetric_detail::solve_wx_lp(analyticalCache, sR, sG, sB, lpRgbw);
+  fl::colorimetric_detail::solve_wx_lp_legacy(analyticalCache, sR, sG, sB, lpRgbw);
 
   lastStrictR16 = clampQ16FromFloat(strictRgbw[0]);
   lastStrictG16 = clampQ16FromFloat(strictRgbw[1]);
@@ -379,13 +451,14 @@ bool solveAnalyticalRGB16(uint16_t r16, uint16_t g16, uint16_t b16, uint8_t mode
   return true;
 }
 
-bool fillAnalyticalRGB16(uint16_t r16, uint16_t g16, uint16_t b16, uint8_t model) {
+bool fillAnalyticalRGB16(uint16_t r16, uint16_t g16, uint16_t b16,
+                         uint8_t model, uint8_t dualEdgePolicy) {
   analyticalModel = (model == ANALYTICAL_MODEL_LP_LEGACY) ? ANALYTICAL_MODEL_LP_LEGACY : ANALYTICAL_MODEL_SUB_GAMUT;
   lastInputR16 = r16;
   lastInputG16 = g16;
   lastInputB16 = b16;
   RGBW16Tuple solved;
-  if (!solveAnalyticalRGB16(r16, g16, b16, analyticalModel, solved)) {
+  if (!solveAnalyticalRGB16(r16, g16, b16, analyticalModel, dualEdgePolicy, solved)) {
     return false;
   }
   applySolvedRGBW16(solved.r, solved.g, solved.b, solved.w);
@@ -505,8 +578,11 @@ void handleCalFrame(const uint8_t* payload, uint16_t payloadLen) {
       break;
     case OP_SET_ANALYTICAL_RGB16:
       if (payloadLen < 8) status = STATUS_BAD_PAYLOAD;
-      else if (!fillAnalyticalRGB16(readU16(payload, 2), readU16(payload, 4), readU16(payload, 6), payload[1])) status = STATUS_SOLVE_FAILED;
+      else if (!fillAnalyticalRGB16(readU16(payload, 2), readU16(payload, 4), readU16(payload, 6), payload[1], payloadLen >= 9 ? payload[8] : DUAL_EDGE_POLICY_Y_CORRECT_CLIP)) status = STATUS_SOLVE_FAILED;
       break;
+    case OP_GET_DIODE_PROFILE:
+      sendDiodeProfileResponse(op, STATUS_OK);
+      return;
     case OP_COMMIT:
       break;
     default:
@@ -519,7 +595,7 @@ void handleCalFrame(const uint8_t* payload, uint16_t payloadLen) {
 
 void handleFrame(uint8_t kind, const uint8_t* payload, uint16_t payloadLen) {
   if (kind == FRAME_KIND_HELLO_REQ) {
-    static const uint8_t helloPayload[] = {'t', 'e', 'e', 'n', 's', 'y', '-', 'r', 'g', 'b', 'w', '-', 'a', 'n', 'a', 'l', 'y', 't', 'i', 'c', '-', 'v', '1'};
+    static const uint8_t helloPayload[] = {'t', 'e', 'e', 'n', 's', 'y', '-', 'r', 'g', 'b', 'w', '-', 'a', 'n', 'a', 'l', 'y', 't', 'i', 'c', '-', 'v', '2'};
     sendFrame(FRAME_KIND_HELLO_RSP, helloPayload, sizeof(helloPayload));
     return;
   }
@@ -591,7 +667,10 @@ void setup() {
   leds.begin(1.4, 100);
   leds.setBrightness(255);
 
+  float d65xy[2] = {0.3127f, 0.3290f};
+  fl::set_input_gamut(&testBenchRgbwProfile, fl::InputGamut::Native);
   fl::set_rgbw_colorimetric_profile(&testBenchRgbwProfile);
+  fl::set_rgbw_colorimetric_dual_edge_policy(fastLedDualEdgePolicy(analyticalDualEdgePolicy));
   fl::colorimetric_detail::build_profile_cache(&testBenchRgbwProfile, &analyticalCache);
 
   auto& cfg = solver.config();
