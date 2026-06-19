@@ -6819,8 +6819,10 @@ def export_calibration_header(
 def _clamp01(x: float) -> float:
     return 0.0 if x < 0.0 else (1.0 if x > 1.0 else x)
 
-def _pq_eotf_norm(x: float) -> float:
-    # SMPTE ST 2084 PQ EOTF, normalized so 1.0 corresponds to 10,000 nits.
+def _pq_eotf_nits(x: float) -> float:
+    # SMPTE ST 2084 PQ EOTF in absolute nits.  The transfer export uses this
+    # absolute value first, then maps it against the measured/overridden display
+    # peak so PQ no longer treats the local display peak as the 0..1 signal span.
     m1 = 2610.0 / 16384.0
     m2 = 2523.0 / 32.0
     c1 = 3424.0 / 4096.0
@@ -6835,8 +6837,13 @@ def _pq_eotf_norm(x: float) -> float:
     numerator = max(power - c1, 0.0)
     denominator = c2 - c3 * power
     if denominator <= 0.0:
-        return 1.0
-    return _clamp01((numerator / denominator) ** (1.0 / m1))
+        return 10000.0
+    return max(0.0, min(10000.0, ((numerator / denominator) ** (1.0 / m1)) * 10000.0))
+
+
+def _pq_eotf_norm(x: float) -> float:
+    # Backward-compatible normalized form: 1.0 corresponds to 10,000 nits.
+    return _clamp01(_pq_eotf_nits(x) / 10000.0)
 
 def _hlg_eotf_norm(x: float) -> float:
     # ARIB STD-B67 / Rec.2100 HLG inverse OETF to normalized relative light.
@@ -6872,42 +6879,220 @@ def _bt1886_eotf_norm(x: float, black_level: float = 0.001) -> float:
     normalized = (luminance - black_level) / (white_level - black_level)
     return _clamp01(normalized)
 
-def _apply_highlight_rolloff_norm(y: float, rolloff: float = 0.0, ceiling: float = 1.0) -> float:
-    """Soft-knee highlight roll-off for transfer curve shaping.
+def _normalize_rolloff_start_control(
+    rolloff_start: float | str | None = None,
+    rolloff_start_percent: float | None = 75.0,
+    rolloff_start_nits: float | None = None,
+):
+    """Normalize the single user-facing roll-off start control.
 
-    With ceiling=1.0 this is a standalone high-end reshaper that leaves
-    black/mid values mostly alone and eases the upper range toward white.
-    With ceiling<1.0, it behaves like a tone-map into an absolute nit cap:
-    values below the computed knee are preserved, and values above the knee
-    are compressed smoothly into the cap instead of scaling the whole curve.
+    The compact UI/CLI convention is intentionally the old behavior the tool
+    used before the split controls: values from 0..100 are percentages, while
+    values above 100 are absolute nits.  The legacy explicit percent/nits
+    arguments are still accepted for compatibility, with the compact control
+    taking precedence when present.
     """
-    y = _clamp01(float(y))
-    rolloff = _clamp01(float(rolloff))
-    ceiling = _clamp01(float(ceiling))
-    if rolloff <= 0.0:
-        return y
+    control_value = None
+    if rolloff_start not in (None, ""):
+        try:
+            control_value = float(rolloff_start)
+        except Exception:
+            control_value = None
+
+    if control_value is not None:
+        if control_value > 100.0:
+            return None, float(control_value), float(control_value)
+        pct = max(0.0, min(100.0, float(control_value)))
+        return pct, None, float(control_value)
+
+    start_nits = None
+    if rolloff_start_nits is not None:
+        try:
+            n = float(rolloff_start_nits)
+            if n > 0.0:
+                start_nits = n
+        except Exception:
+            start_nits = None
+    if start_nits is not None:
+        return None, float(start_nits), float(start_nits)
+
+    try:
+        pct = float(rolloff_start_percent if rolloff_start_percent is not None else 75.0)
+    except Exception:
+        pct = 75.0
+    pct = max(0.0, min(100.0, pct))
+    return pct, None, float(pct)
+
+
+def _resolve_rolloff_start_norm(
+    rolloff_start_percent: float | None = 75.0,
+    rolloff_start_nits: float | None = None,
+    reference_peak_nits: float | None = None,
+    output_ceiling: float = 1.0,
+    rolloff_start: float | str | None = None,
+):
+    """Resolve the user-facing highlight roll-off start into output-normalized light.
+
+    ``nit_cap`` remains an output ceiling only.  It does not imply the start of
+    the roll-off region.  A single compact start control is accepted: 0..100 is
+    a percent of the current output ceiling, while 101+ is absolute nits.
+    """
+    ceiling = _clamp01(float(output_ceiling))
     if ceiling <= 0.0:
         return 0.0
 
-    # Stronger roll-off starts earlier.  With an absolute cap this keeps
-    # sub-cap diffuse highlights intact while giving MDL4000-style speculars
-    # a controlled landing zone instead of a hard ceiling.
-    knee = ceiling * (1.0 - 0.50 * rolloff)
-    knee = max(0.0, min(knee, ceiling))
-    if y <= knee:
-        return _clamp01(y)
-    if y >= 1.0:
-        return _clamp01(ceiling)
+    pct, nits, _control = _normalize_rolloff_start_control(
+        rolloff_start=rolloff_start,
+        rolloff_start_percent=rolloff_start_percent,
+        rolloff_start_nits=rolloff_start_nits,
+    )
 
-    in_span = max(1e-9, 1.0 - knee)
-    out_span = max(0.0, ceiling - knee)
-    if out_span <= 1e-9:
+    start = None
+    if nits is not None:
+        ref_peak = float(reference_peak_nits) if reference_peak_nits is not None else 0.0
+        if ref_peak > 0.0:
+            start = float(nits) / ref_peak
+
+    if start is None:
+        pct = 75.0 if pct is None else float(pct)
+        start = ceiling * (max(0.0, min(100.0, pct)) / 100.0)
+
+    # Leave a non-zero span into the ceiling when roll-off is active.  If the
+    # user requests a start above the current ceiling, clamp it just below that
+    # ceiling instead of letting it turn into an immediate hard clip.
+    return max(0.0, min(float(start), max(0.0, ceiling - 1e-6)))
+
+
+def _apply_highlight_rolloff_norm(
+    y: float,
+    rolloff: float = 0.0,
+    ceiling: float = 1.0,
+    source_ceiling: float | None = None,
+    rolloff_start: float | None = None,
+) -> float:
+    """Smooth highlight roll-off / tone-map for transfer curve shaping.
+
+    ``y`` may be above 1.0.  This is important for PQ: the raw ST2084 value is
+    decoded in absolute nits and normalized against the measured/override peak,
+    so values above the local display peak naturally become >1.0.  The roll-off
+    start is independent from ``nit_cap``: the cap is only the output ceiling,
+    while the start chooses where the smooth shoulder begins.
+    """
+    y = max(0.0, float(y))
+    rolloff = _clamp01(float(rolloff))
+    ceiling = _clamp01(float(ceiling))
+    if ceiling <= 0.0:
+        return 0.0
+
+    # With roll-off disabled, keep the old ceiling behavior: no global rescale,
+    # just clip to the output cap/peak.
+    if rolloff <= 0.0:
         return _clamp01(min(y, ceiling))
 
-    t = _clamp01((y - knee) / in_span)
-    strength = 1.0 + 8.0 * rolloff
-    eased = math.log1p(strength * t) / math.log1p(strength)
-    return _clamp01(knee + out_span * eased)
+    start = _resolve_rolloff_start_norm(
+        rolloff_start_percent=75.0,
+        rolloff_start_nits=None,
+        reference_peak_nits=None,
+        output_ceiling=ceiling,
+    ) if rolloff_start is None else max(0.0, min(float(rolloff_start), max(0.0, ceiling - 1e-6)))
+
+    if y <= start:
+        return _clamp01(y)
+
+    src_top = float(source_ceiling) if source_ceiling is not None else 1.0
+    src_top = max(src_top, ceiling, start + 1e-6, y)
+
+    # Always use a C1-continuous tone-map once roll-off is enabled.  The older
+    # exponential shoulder changed slope abruptly at the roll-off start, which
+    # showed up as a visible knee/cliff when strength was high.  This rational
+    # shoulder keeps the identity slope exactly at the start point, reaches the
+    # output ceiling at the source top, and remains smooth/monotonic throughout
+    # the highlight region.  Strength changes how quickly the shoulder bends;
+    # it never reintroduces a clipped/blended transition.
+    out_span = max(1e-6, ceiling - start)
+    src_span = max(1e-6, src_top - start)
+    z_top = max(1.0 + 1e-6, src_span / out_span)
+    z = max(0.0, min(float(y), src_top) - start) / out_span
+    z = min(z, z_top)
+
+    strength = max(0.0, min(1.0, rolloff))
+    # strength=1.0 -> aggressive high-end compression; low non-zero strengths
+    # stay closer to the unclipped curve, but are still smooth shoulders.
+    shape_a = 0.035 + 6.0 * ((1.0 - strength) ** 2.0)
+    shape_b = (z_top - 1.0) / z_top
+    denom = 1.0 + shape_b * z + shape_a * z * z
+    if denom <= 1e-12:
+        toned_norm = 1.0
+    else:
+        toned_norm = (z * (1.0 + shape_a * z)) / denom
+    toned = start + out_span * max(0.0, min(1.0, toned_norm))
+    return _clamp01(min(max(toned, 0.0), ceiling))
+
+def _base_transfer_curve_norm(
+    x: float,
+    curve: str = "gamma",
+    gamma: float = 2.2,
+    reference_peak_nits: float | None = None,
+):
+    """Return the raw transfer value and its source ceiling.
+
+    For PQ, the raw value is ST2084 absolute nits divided by the measured or
+    overridden reference peak.  That means a 1500-nit display maps the PQ code
+    for ~1500 nits to 1.0, while higher PQ codes remain over-range until the
+    highlight roll-off/tone-map stage handles them.
+    """
+    x = _clamp01(float(x))
+    gamma = max(0.05, float(gamma))
+    curve = str(curve or "gamma")
+
+    if curve == "linear":
+        return x, 1.0
+    if curve == "gamma":
+        return x ** gamma, 1.0
+    if curve == "pq":
+        ref_peak = float(reference_peak_nits) if reference_peak_nits is not None else 10000.0
+        ref_peak = max(1e-6, ref_peak)
+        return _pq_eotf_nits(x) / ref_peak, max(1.0, 10000.0 / ref_peak)
+    if curve == "hlg":
+        return _hlg_eotf_norm(x), 1.0
+    if curve == "bt1886":
+        return _bt1886_eotf_norm(x), 1.0
+    if curve == "srgb-ish":
+        if x <= 0.04045:
+            return x / 12.92, 1.0
+        return ((x + 0.055) / 1.055) ** 2.4, 1.0
+    if curve == "toe-gamma":
+        toe = x * x * (3.0 - 2.0 * x)
+        return toe ** gamma, 1.0
+    return x ** gamma, 1.0
+
+
+def _is_absolute_nits_transfer_curve(curve: str | None) -> bool:
+    """Return True for curves whose code values decode to absolute scene nits.
+
+    PQ/ST.2084 is absolute-nit encoded.  SDR/relative curves such as linear,
+    gamma, BT.1886, HLG, sRGB-ish, and toe-gamma are display-relative in this
+    tool: input 1.0 is the signal's full-scale white and should be mapped to
+    the selected output endpoint.  A nit cap therefore scales the full-scale
+    endpoint for relative curves; it must not clip the curve into a plateau.
+    """
+    return str(curve or "").strip().lower() == "pq"
+
+
+def transfer_curve_raw_norm(
+    x: float,
+    curve: str = "gamma",
+    gamma: float = 2.2,
+    reference_peak_nits: float | None = None,
+) -> float:
+    raw, _source_ceiling = _base_transfer_curve_norm(
+        x,
+        curve=curve,
+        gamma=gamma,
+        reference_peak_nits=reference_peak_nits,
+    )
+    return max(0.0, float(raw))
+
 
 def apply_transfer_curve_norm(
     x: float,
@@ -6915,50 +7100,83 @@ def apply_transfer_curve_norm(
     gamma: float = 2.2,
     shadow_lift: float = 0.0,
     shoulder: float = 0.0,
-    rolloff: float = 0.0):
-    x = _clamp01(float(x))
-    gamma = max(0.05, float(gamma))
+    rolloff: float = 0.0,
+    rolloff_start: float | str | None = None,
+    rolloff_start_percent: float | None = 75.0,
+    rolloff_start_nits: float | None = None,
+    reference_peak_nits: float | None = None,
+    output_ceiling: float = 1.0,
+):
+    curve_key = str(curve or "gamma").strip().lower()
+    absolute_nits_curve = _is_absolute_nits_transfer_curve(curve_key)
+    raw_y, source_ceiling = _base_transfer_curve_norm(
+        x,
+        curve=curve_key,
+        gamma=gamma,
+        reference_peak_nits=reference_peak_nits,
+    )
+    y = max(0.0, float(raw_y))
     shadow_lift = _clamp01(float(shadow_lift))
     shoulder = _clamp01(float(shoulder))
     rolloff = _clamp01(float(rolloff))
+    output_ceiling = _clamp01(float(output_ceiling))
+    if output_ceiling <= 0.0:
+        return 0.0
 
-    if curve == "linear":
-        y = x
-    elif curve == "gamma":
-        y = x ** gamma
-    elif curve == "pq":
-        y = _pq_eotf_norm(x)
-    elif curve == "hlg":
-        y = _hlg_eotf_norm(x)
-    elif curve == "bt1886":
-        y = _bt1886_eotf_norm(x)
-    elif curve == "srgb-ish":
-        # Approximate perceptual shaping for experimentation.
-        if x <= 0.04045:
-            y = x / 12.92
-        else:
-            y = ((x + 0.055) / 1.055) ** 2.4
-    elif curve == "toe-gamma":
-        # Soft toe before gamma shaping.
-        toe = x * x * (3.0 - 2.0 * x)
-        y = toe ** gamma
+    # PQ/ST.2084 is absolute-nit encoded, so the nit cap is a true highlight
+    # ceiling in the decoded-nits domain.  SDR/relative curves are different:
+    # input 1.0 is full-scale signal white, so the nit cap selects where that
+    # full-scale endpoint lands in the measured ladder.  Do not clip relative
+    # curves to output_ceiling or they plateau early; scale the final endpoint.
+    if absolute_nits_curve:
+        rolloff_reference_peak = reference_peak_nits
+        rolloff_output_ceiling = output_ceiling
     else:
-        y = x ** gamma
+        base_peak = float(reference_peak_nits) if reference_peak_nits is not None else 0.0
+        rolloff_reference_peak = base_peak * output_ceiling if base_peak > 0.0 else None
+        rolloff_output_ceiling = 1.0
 
-    # Shadow lift mixes in sqrt(y), which brightens low end.
-    if shadow_lift > 0.0:
+    rolloff_start_norm = _resolve_rolloff_start_norm(
+        rolloff_start_percent=rolloff_start_percent,
+        rolloff_start_nits=rolloff_start_nits,
+        reference_peak_nits=rolloff_reference_peak,
+        output_ceiling=rolloff_output_ceiling,
+        rolloff_start=rolloff_start,
+    )
+
+    # Shadow lift is meant for the lower/mid range.  Leave PQ over-range values
+    # intact so the top-end tone-map, not shadow shaping, decides how they land.
+    if shadow_lift > 0.0 and y <= 1.0:
         y = (1.0 - shadow_lift) * y + shadow_lift * math.sqrt(max(0.0, y))
 
-    # Shoulder compresses highlights downward without changing black point.
-    if shoulder > 0.0:
+    # Shoulder is also a normalized-domain modifier.  Values above 1.0 are left
+    # for the explicit PQ highlight roll-off stage below.
+    if shoulder > 0.0 and y < 1.0:
         y = 1.0 - ((1.0 - y) ** (1.0 / (1.0 + shoulder)))
 
-    # Roll-off is a high-only soft knee.  Absolute-cap handling uses the same
-    # helper with ceiling<1.0 in build_transfer_curve_preview().
-    if rolloff > 0.0:
-        y = _apply_highlight_rolloff_norm(y, rolloff=rolloff, ceiling=1.0)
+    if absolute_nits_curve:
+        if rolloff > 0.0 or output_ceiling < 1.0 or y > output_ceiling:
+            y = _apply_highlight_rolloff_norm(
+                y,
+                rolloff=rolloff,
+                ceiling=output_ceiling,
+                source_ceiling=source_ceiling,
+                rolloff_start=rolloff_start_norm,
+            )
+        return _clamp01(y)
 
-    return _clamp01(y)
+    # Relative curves stay normalized and monotonic through the whole input
+    # range.  Optional roll-off shapes the normalized top end, then the nit cap
+    # scales the full-scale endpoint to the requested measured-Y target.
+    if rolloff > 0.0:
+        y = _apply_highlight_rolloff_norm(
+            y,
+            rolloff=rolloff,
+            ceiling=1.0,
+            source_ceiling=source_ceiling,
+            rolloff_start=rolloff_start_norm,
+        )
+    return _clamp01(_clamp01(y) * output_ceiling)
 
 def _build_transfer_curve_config(
     curve: str = "gamma",
@@ -6966,13 +7184,24 @@ def _build_transfer_curve_config(
     shadow_lift: float = 0.0,
     shoulder: float = 0.0,
     rolloff: float = 0.0,
+    rolloff_start: float | str | None = None,
+    rolloff_start_percent: float | None = 75.0,
+    rolloff_start_nits: float | None = None,
 ):
+    start_pct, start_nits, start_control = _normalize_rolloff_start_control(
+        rolloff_start=rolloff_start,
+        rolloff_start_percent=rolloff_start_percent,
+        rolloff_start_nits=rolloff_start_nits,
+    )
     return {
         "type": str(curve),
         "gamma": float(max(0.05, float(gamma))),
         "shadow_lift": float(_clamp01(float(shadow_lift))),
         "shoulder": float(_clamp01(float(shoulder))),
         "rolloff": float(_clamp01(float(rolloff))),
+        "rolloff_start": float(start_control),
+        "rolloff_start_percent": None if start_pct is None else float(max(0.0, min(100.0, start_pct))),
+        "rolloff_start_nits": None if start_nits is None else float(start_nits),
     }
 
 def _resolve_transfer_channel_configs(
@@ -6981,6 +7210,9 @@ def _resolve_transfer_channel_configs(
     shadow_lift: float = 0.0,
     shoulder: float = 0.0,
     rolloff: float = 0.0,
+    rolloff_start: float | str | None = None,
+    rolloff_start_percent: float | None = 75.0,
+    rolloff_start_nits: float | None = None,
     channel_configs: dict | None = None,
 ):
     shared = _build_transfer_curve_config(
@@ -6989,6 +7221,9 @@ def _resolve_transfer_channel_configs(
         shadow_lift=shadow_lift,
         shoulder=shoulder,
         rolloff=rolloff,
+        rolloff_start=rolloff_start,
+        rolloff_start_percent=rolloff_start_percent,
+        rolloff_start_nits=rolloff_start_nits,
     )
     resolved = {}
     for ch in CHANNELS:
@@ -6999,6 +7234,9 @@ def _resolve_transfer_channel_configs(
             shadow_lift=override.get("shadow_lift", shared["shadow_lift"]),
             shoulder=override.get("shoulder", shared["shoulder"]),
             rolloff=override.get("rolloff", shared["rolloff"]),
+            rolloff_start=override.get("rolloff_start", shared.get("rolloff_start")),
+            rolloff_start_percent=override.get("rolloff_start_percent", shared.get("rolloff_start_percent")),
+            rolloff_start_nits=override.get("rolloff_start_nits", shared.get("rolloff_start_nits")),
         )
     return shared, resolved
 
@@ -7096,6 +7334,121 @@ def _resolve_transfer_nit_cap_metadata(reference_peak_nits: float, nit_cap: floa
         "normalized_limit": float(normalized_limit),
     }
 
+
+def _build_distance_correction_config(
+    enabled: bool = False,
+    bench_distance_inches: float = 4.875,
+    target_distance_inches: float = 6.875,
+    proportional: bool = True,
+    proportional_strength: float = 1.0,
+):
+    """Build the simple inverse-square Y preprocessor config.
+
+    The measured LUTs were captured at the bench distance.  When the actual
+    wall distance is larger, measured Y values are preprocessed by an
+    inverse-square scale before transfer-curve logic sees them.  With the
+    proportional mode enabled, low outputs receive the raw inverse-square loss
+    while high outputs retain more of their measured brightness; raw mode uses
+    the same inverse-square factor for the whole range.
+    """
+    try:
+        bench = float(bench_distance_inches)
+    except Exception:
+        bench = 0.0
+    try:
+        target = float(target_distance_inches)
+    except Exception:
+        target = 0.0
+    strength = _clamp01(float(proportional_strength))
+    enabled = bool(enabled) and bench > 0.0 and target > 0.0
+    if not enabled:
+        return {
+            "enabled": False,
+            "bench_distance_inches": bench,
+            "target_distance_inches": target,
+            "base_scale": 1.0,
+            "proportional": bool(proportional),
+            "proportional_strength": strength,
+            "peak_scale": 1.0,
+        }
+    base_scale = max(1e-9, (bench / target) ** 2.0)
+    cfg = {
+        "enabled": True,
+        "bench_distance_inches": bench,
+        "target_distance_inches": target,
+        "base_scale": float(base_scale),
+        "proportional": bool(proportional),
+        "proportional_strength": strength,
+    }
+    cfg["peak_scale"] = float(_distance_luma_scale_for_norm(1.0, cfg))
+    return cfg
+
+
+def _distance_luma_scale_for_norm(command_norm: float, cfg: dict | None) -> float:
+    if not cfg or not bool(cfg.get("enabled", False)):
+        return 1.0
+    base = float(cfg.get("base_scale", 1.0))
+    if not bool(cfg.get("proportional", True)):
+        return base
+    strength = _clamp01(float(cfg.get("proportional_strength", 1.0)))
+    # Brightness-proportional distance loss:
+    #   raw mode / strength=0: every point, including peak, is scaled by the
+    #       inverse-square base factor.
+    #   proportional strength=1: the top code keeps the original measured/
+    #       override peak, while the lowest non-zero codes see essentially the
+    #       full inverse-square loss.
+    # Intermediate strengths blend the peak scale from base toward 1.0 and
+    # ramp the per-command loss between those endpoints.
+    b = _clamp01(float(command_norm))
+    return max(1e-9, base + ((1.0 - base) * strength * b))
+
+
+def _distance_corrected_norm_from_command(command_norm: float, cfg: dict | None) -> float:
+    command_norm = _clamp01(float(command_norm))
+    if not cfg or not bool(cfg.get("enabled", False)):
+        return command_norm
+    peak_scale = max(1e-9, float(cfg.get("peak_scale", _distance_luma_scale_for_norm(1.0, cfg))))
+    corrected = command_norm * _distance_luma_scale_for_norm(command_norm, cfg) / peak_scale
+    return _clamp01(corrected)
+
+
+def _distance_command_norm_from_corrected_norm(target_norm: float, cfg: dict | None) -> float:
+    target_norm = _clamp01(float(target_norm))
+    if not cfg or not bool(cfg.get("enabled", False)):
+        return target_norm
+    if target_norm <= 0.0:
+        return 0.0
+    if target_norm >= 1.0:
+        return 1.0
+    lo, hi = 0.0, 1.0
+    for _ in range(32):
+        mid = (lo + hi) * 0.5
+        if _distance_corrected_norm_from_command(mid, cfg) < target_norm:
+            lo = mid
+        else:
+            hi = mid
+    return _clamp01(hi)
+
+
+def _apply_distance_correction_to_peak_metadata(peak_meta: dict, cfg: dict | None):
+    out = dict(peak_meta or {})
+    out["distance_correction"] = dict(cfg or {"enabled": False})
+    if not cfg or not bool(cfg.get("enabled", False)):
+        return out
+    peak_scale = max(1e-9, float(cfg.get("peak_scale", 1.0)))
+    original_reference = float(out.get("reference_peak_nits", 0.0) or 0.0)
+    original_channel_peaks = {
+        ch: float((out.get("channel_peak_nits", {}) or {}).get(ch, original_reference) or 0.0)
+        for ch in CHANNELS
+    }
+    out["original_reference_peak_nits"] = original_reference
+    out["original_channel_peak_nits"] = dict(original_channel_peaks)
+    out["reference_peak_nits"] = float(original_reference * peak_scale)
+    out["channel_peak_nits"] = {ch: float(v * peak_scale) for ch, v in original_channel_peaks.items()}
+    out["reference_peak_source"] = f"{out.get('reference_peak_source', 'unknown')}+distance"
+    out["distance_correction"] = dict(cfg)
+    return out
+
 def choose_monotonic_state(monotonic, target_q16: int, selection: str = "floor"):
     if not monotonic:
         return {"value": 0, "bfi": 0, "output_q16": 0}
@@ -7121,11 +7474,19 @@ def build_transfer_curve_preview(
     shadow_lift: float = 0.0,
     shoulder: float = 0.0,
     rolloff: float = 0.0,
+    rolloff_start: float | str | None = None,
+    rolloff_start_percent: float | None = 75.0,
+    rolloff_start_nits: float | None = None,
     selection: str = "floor",
     channel_configs: dict | None = None,
     peak_nits_override: float | None = None,
     nit_cap: float | None = None,
-    exclude_white: bool = False):
+    exclude_white: bool = False,
+    distance_correction: bool = False,
+    bench_distance_inches: float = 4.875,
+    target_distance_inches: float = 6.875,
+    distance_proportional: bool = True,
+    distance_proportional_strength: float = 1.0):
     requested_bucket_count = int(bucket_count)
     if requested_bucket_count > 0:
         bucket_count = max(2, requested_bucket_count)
@@ -7137,12 +7498,24 @@ def build_transfer_curve_preview(
         shadow_lift=shadow_lift,
         shoulder=shoulder,
         rolloff=rolloff,
+        rolloff_start=rolloff_start,
+        rolloff_start_percent=rolloff_start_percent,
+        rolloff_start_nits=rolloff_start_nits,
         channel_configs=channel_configs,
     )
     peak_meta = _resolve_transfer_peak_metadata(lut_dir, peak_nits_override=peak_nits_override, exclude_white=exclude_white)
+    distance_cfg = _build_distance_correction_config(
+        enabled=distance_correction,
+        bench_distance_inches=bench_distance_inches,
+        target_distance_inches=target_distance_inches,
+        proportional=distance_proportional,
+        proportional_strength=distance_proportional_strength,
+    )
+    peak_meta = _apply_distance_correction_to_peak_metadata(peak_meta, distance_cfg)
 
     # When white is excluded and no explicit nit cap is given, auto-cap to the
     # brightest non-white channel so the transfer curve stays within RGB range.
+    # This cap is now a highlight ceiling, not a global scale-down factor.
     effective_nit_cap = nit_cap
     if exclude_white and effective_nit_cap is None:
         rgb_peaks = [float(peak_meta["channel_peak_nits"].get(ch, 0.0)) for ch in ["R", "G", "B"]]
@@ -7154,64 +7527,110 @@ def build_transfer_curve_preview(
         peak_meta["reference_peak_nits"],
         nit_cap=effective_nit_cap,
     )
+    output_ceiling = float(nit_cap_meta.get("normalized_limit", 1.0)) if nit_cap_meta.get("enabled") else 1.0
+    common_curve = dict(shared_curve)
+    absolute_nits_curve = _is_absolute_nits_transfer_curve(common_curve.get("type"))
+    if absolute_nits_curve:
+        rolloff_reference_peak_nits = float(peak_meta["reference_peak_nits"])
+        rolloff_output_ceiling = output_ceiling
+    else:
+        rolloff_reference_peak_nits = float(peak_meta["reference_peak_nits"]) * output_ceiling
+        rolloff_output_ceiling = 1.0
+    rolloff_start_norm = _resolve_rolloff_start_norm(
+        rolloff_start=common_curve.get("rolloff_start"),
+        rolloff_start_percent=common_curve.get("rolloff_start_percent", 75.0),
+        rolloff_start_nits=common_curve.get("rolloff_start_nits"),
+        reference_peak_nits=rolloff_reference_peak_nits,
+        output_ceiling=rolloff_output_ceiling,
+    )
     active_channels = [ch for ch in CHANNELS if not (exclude_white and ch == "W")]
+
+    # The runtime transfer LUT is intentionally a single shared 1D curve.  The
+    # header still emits TARGET_R/G/B/W arrays because the downstream firmware
+    # currently expects channel-labelled arrays, but the target arrays are kept
+    # bit-identical.  Per-channel ladders are only used to preview achieved
+    # quantization/state selection against that shared target curve.
+    raw_target_q16 = []
+    target_q16 = []
+    for i in range(bucket_count):
+        x = i / (bucket_count - 1)
+        raw_y = transfer_curve_raw_norm(
+            x,
+            curve=common_curve["type"],
+            gamma=common_curve["gamma"],
+            reference_peak_nits=peak_meta["reference_peak_nits"],
+        )
+        raw_command = _distance_command_norm_from_corrected_norm(_clamp01(raw_y), distance_cfg)
+        raw_target_q16.append(int(round(raw_command * 65535.0)))
+        y = apply_transfer_curve_norm(
+            x,
+            curve=common_curve["type"],
+            gamma=common_curve["gamma"],
+            shadow_lift=common_curve["shadow_lift"],
+            shoulder=common_curve["shoulder"],
+            rolloff=common_curve["rolloff"],
+            rolloff_start=common_curve.get("rolloff_start"),
+            rolloff_start_percent=common_curve.get("rolloff_start_percent", 75.0),
+            rolloff_start_nits=common_curve.get("rolloff_start_nits"),
+            reference_peak_nits=peak_meta["reference_peak_nits"],
+            output_ceiling=output_ceiling,
+        )
+        command = _distance_command_norm_from_corrected_norm(y, distance_cfg)
+        target_q16.append(int(round(command * 65535.0)))
+
     out = {
-        "format": "TemporalBFI_TransferCurve_v1",
+        "format": "TemporalBFI_TransferCurve_v2",
         "exclude_white": bool(exclude_white),
         "curve": {
-            "type": shared_curve["type"],
-            "gamma": float(shared_curve["gamma"]),
-            "shadow_lift": float(shared_curve["shadow_lift"]),
-            "shoulder": float(shared_curve["shoulder"]),
-            "rolloff": float(shared_curve["rolloff"]),
+            "type": common_curve["type"],
+            "gamma": float(common_curve["gamma"]),
+            "shadow_lift": float(common_curve["shadow_lift"]),
+            "shoulder": float(common_curve["shoulder"]),
+            "rolloff": float(common_curve["rolloff"]),
+            "rolloff_start": float(common_curve.get("rolloff_start", common_curve.get("rolloff_start_percent", 75.0) or common_curve.get("rolloff_start_nits") or 75.0)),
+            "rolloff_start_percent": common_curve.get("rolloff_start_percent"),
+            "rolloff_start_nits": common_curve.get("rolloff_start_nits"),
+            "effective_rolloff_start_norm": float(rolloff_start_norm),
+            "effective_rolloff_start_nits": float(rolloff_start_norm * rolloff_reference_peak_nits),
             "selection": selection,
-            "per_channel_enabled": bool(channel_configs),
-            "channels": resolved_channel_curves,
+            "shared_1d_lut": True,
+            "per_channel_enabled": False,
+            "per_channel_requested": bool(channel_configs),
+            "channels": {ch: dict(common_curve) for ch in CHANNELS},
+            "requested_channel_overrides": resolved_channel_curves if channel_configs else {},
             "peak_nits_override": float(peak_nits_override) if peak_nits_override is not None and float(peak_nits_override) > 0.0 else None,
             "reference_peak_nits": float(peak_meta["reference_peak_nits"]),
             "reference_peak_source": str(peak_meta["reference_peak_source"]),
             "brightest_channel": str(peak_meta["brightest_channel"]),
+            "luminance_mapping": "absolute-nits ceiling" if absolute_nits_curve else "relative full-scale endpoint scaled to nit cap",
+            "pq_mapping": "ST2084 absolute nits divided by reference_peak_nits; independent smooth highlight roll-off maps the selected start toward the output ceiling" if absolute_nits_curve else "relative SDR/HLG/gamma curve remains normalized; nit cap scales input 1.0 to the selected measured-Y endpoint without creating a plateau",
             "nit_cap": dict(nit_cap_meta),
+            "distance_correction": dict(distance_cfg),
+            "original_reference_peak_nits": float(peak_meta.get("original_reference_peak_nits", peak_meta["reference_peak_nits"])),
         },
         "bucket_count": bucket_count,
         "channel_peak_nits": dict(peak_meta["channel_peak_nits"]),
+        "shared_target_q16": list(target_q16),
+        "shared_raw_target_q16": list(raw_target_q16),
         "channels": {},
     }
 
     for ch in active_channels:
         mono = load_monotonic_ladder(lut_dir, ch)
-        curve_cfg = resolved_channel_curves[ch]
-        channel_peak_nits = float(peak_meta["channel_peak_nits"].get(ch, peak_meta["reference_peak_nits"]))
-        target_q16 = []
         achieved_q16 = []
-        for i in range(bucket_count):
-            x = i / (bucket_count - 1)
-            y = apply_transfer_curve_norm(
-                x,
-                curve=curve_cfg["type"],
-                gamma=curve_cfg["gamma"],
-                shadow_lift=curve_cfg["shadow_lift"],
-                shoulder=curve_cfg["shoulder"],
-                rolloff=0.0 if (nit_cap_meta["enabled"] and float(curve_cfg.get("rolloff", 0.0)) > 0.0) else curve_cfg["rolloff"],
-            )
-            if nit_cap_meta["enabled"]:
-                if float(curve_cfg.get("rolloff", 0.0)) > 0.0:
-                    y = _apply_highlight_rolloff_norm(
-                        y,
-                        rolloff=curve_cfg["rolloff"],
-                        ceiling=float(nit_cap_meta["normalized_limit"]),
-                    )
-                else:
-                    y = float(y) * float(nit_cap_meta["normalized_limit"])
-            tq16 = int(round(y * 65535.0))
+        raw_achieved_q16 = []
+        for tq16, raw_tq16 in zip(target_q16, raw_target_q16):
             state = choose_monotonic_state(mono, tq16, selection=selection)
-            target_q16.append(tq16)
+            raw_state = choose_monotonic_state(mono, raw_tq16, selection=selection)
             achieved_q16.append(int(state.get("output_q16", 0)))
+            raw_achieved_q16.append(int(raw_state.get("output_q16", 0)))
         out["channels"][ch] = {
-            "curve": dict(curve_cfg),
-            "peak_nits": float(channel_peak_nits),
-            "target_q16": target_q16,
+            "curve": dict(common_curve),
+            "peak_nits": float(peak_meta["channel_peak_nits"].get(ch, peak_meta["reference_peak_nits"])),
+            "target_q16": list(target_q16),
             "achieved_q16": achieved_q16,
+            "raw_target_q16": list(raw_target_q16),
+            "raw_achieved_q16": raw_achieved_q16,
         }
     return out
 
@@ -7224,18 +7643,35 @@ def export_transfer_json(
     shadow_lift: float = 0.0,
     shoulder: float = 0.0,
     rolloff: float = 0.0,
+    rolloff_start: float | str | None = None,
+    rolloff_start_percent: float | None = 75.0,
+    rolloff_start_nits: float | None = None,
     selection: str = "floor",
     channel_configs: dict | None = None,
     peak_nits_override: float | None = None,
     nit_cap: float | None = None,
-    exclude_white: bool = False):
+    exclude_white: bool = False,
+    distance_correction: bool = False,
+    bench_distance_inches: float = 4.875,
+    target_distance_inches: float = 6.875,
+    distance_proportional: bool = True,
+    distance_proportional_strength: float = 1.0):
     data = build_transfer_curve_preview(
         lut_dir, bucket_count=bucket_count, curve=curve, gamma=gamma,
-        shadow_lift=shadow_lift, shoulder=shoulder, rolloff=rolloff, selection=selection,
+        shadow_lift=shadow_lift, shoulder=shoulder, rolloff=rolloff,
+        rolloff_start=rolloff_start,
+        rolloff_start_percent=rolloff_start_percent,
+        rolloff_start_nits=rolloff_start_nits,
+        selection=selection,
         channel_configs=channel_configs,
         peak_nits_override=peak_nits_override,
         nit_cap=nit_cap,
         exclude_white=exclude_white,
+        distance_correction=distance_correction,
+        bench_distance_inches=bench_distance_inches,
+        target_distance_inches=target_distance_inches,
+        distance_proportional=distance_proportional,
+        distance_proportional_strength=distance_proportional_strength,
     )
     out_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -7248,26 +7684,44 @@ def export_transfer_header(
     shadow_lift: float = 0.0,
     shoulder: float = 0.0,
     rolloff: float = 0.0,
+    rolloff_start: float | str | None = None,
+    rolloff_start_percent: float | None = 75.0,
+    rolloff_start_nits: float | None = None,
     selection: str = "floor",
     channel_configs: dict | None = None,
     peak_nits_override: float | None = None,
     nit_cap: float | None = None,
-    exclude_white: bool = False):
+    exclude_white: bool = False,
+    distance_correction: bool = False,
+    bench_distance_inches: float = 4.875,
+    target_distance_inches: float = 6.875,
+    distance_proportional: bool = True,
+    distance_proportional_strength: float = 1.0):
     data = build_transfer_curve_preview(
         lut_dir, bucket_count=bucket_count, curve=curve, gamma=gamma,
-        shadow_lift=shadow_lift, shoulder=shoulder, rolloff=rolloff, selection=selection,
+        shadow_lift=shadow_lift, shoulder=shoulder, rolloff=rolloff,
+        rolloff_start=rolloff_start,
+        rolloff_start_percent=rolloff_start_percent,
+        rolloff_start_nits=rolloff_start_nits,
+        selection=selection,
         channel_configs=channel_configs,
         peak_nits_override=peak_nits_override,
         nit_cap=nit_cap,
         exclude_white=exclude_white,
+        distance_correction=distance_correction,
+        bench_distance_inches=bench_distance_inches,
+        target_distance_inches=target_distance_inches,
+        distance_proportional=distance_proportional,
+        distance_proportional_strength=distance_proportional_strength,
     )
     resolved_bucket_count = int(data["bucket_count"])
     curve_meta = dict(data.get("curve", {}))
     nit_cap_meta = dict(curve_meta.get("nit_cap", {}))
+    distance_meta = dict(curve_meta.get("distance_correction", {}))
     white_excluded = bool(data.get("exclude_white", False))
     header_channels = [ch for ch in CHANNELS if ch in data["channels"]]
     lines = [
-        "// Auto-generated transfer curve preview header v12",
+        "// Auto-generated transfer curve preview header v13",
         "#pragma once",
         "",
         "#include <Arduino.h>",
@@ -7281,8 +7735,23 @@ def export_transfer_header(
         f"static constexpr float REQUESTED_NIT_CAP = {float(nit_cap_meta.get('requested_nits') or 0.0):.6f}f;",
         f"static constexpr float EFFECTIVE_NIT_CAP = {float(nit_cap_meta.get('effective_nits') or 0.0):.6f}f;",
         f"static constexpr float NIT_CAP_NORMALIZED_LIMIT = {float(nit_cap_meta.get('normalized_limit', 1.0)):.9f}f;",
+        f"static const uint8_t DISTANCE_CORRECTION_ENABLED = {1 if distance_meta.get('enabled', False) else 0};",
+        f"static constexpr float DISTANCE_BENCH_INCHES = {float(distance_meta.get('bench_distance_inches', 0.0) or 0.0):.6f}f;",
+        f"static constexpr float DISTANCE_TARGET_INCHES = {float(distance_meta.get('target_distance_inches', 0.0) or 0.0):.6f}f;",
+        f"static constexpr float DISTANCE_BASE_SCALE = {float(distance_meta.get('base_scale', 1.0) or 1.0):.9f}f;",
+        f"static const uint8_t DISTANCE_PROPORTIONAL = {1 if distance_meta.get('proportional', True) else 0};",
+        f"static constexpr float DISTANCE_PROPORTIONAL_STRENGTH = {float(distance_meta.get('proportional_strength', 0.0) or 0.0):.6f}f;",
+        f"static constexpr float DISTANCE_PEAK_SCALE = {float(distance_meta.get('peak_scale', 1.0) or 1.0):.9f}f;",
+        f"static constexpr float ORIGINAL_REFERENCE_PEAK_NITS = {float(curve_meta.get('original_reference_peak_nits', curve_meta.get('reference_peak_nits', 0.0))):.6f}f;",
         f"static const uint8_t WHITE_EXCLUDED = {1 if white_excluded else 0};",
         f"static constexpr float CURVE_ROLLOFF = {float(curve_meta.get('rolloff', 0.0)):.6f}f;",
+        f"static constexpr float ROLLOFF_START = {float(curve_meta.get('rolloff_start', 75.0)):.6f}f;",
+        f"static constexpr float ROLLOFF_START_PERCENT = {float(curve_meta.get('rolloff_start_percent') if curve_meta.get('rolloff_start_percent') is not None else 0.0):.6f}f;",
+        f"static constexpr float ROLLOFF_START_NITS = {float(curve_meta.get('rolloff_start_nits') or 0.0):.6f}f;",
+        f"static constexpr float EFFECTIVE_ROLLOFF_START_NITS = {float(curve_meta.get('effective_rolloff_start_nits', 0.0)):.6f}f;",
+        f"static constexpr float EFFECTIVE_ROLLOFF_START_NORM = {float(curve_meta.get('effective_rolloff_start_norm', 0.0)):.9f}f;",
+        f"static const uint8_t SHARED_1D_LUT = {1 if curve_meta.get('shared_1d_lut', False) else 0};",
+        "// TARGET_R/G/B/W are intentionally duplicated copies of one shared 1D transfer LUT.",
         "",
     ]
     for ch in header_channels:
@@ -7313,10 +7782,18 @@ def _add_transfer_curve_parser_args(parser):
     parser.add_argument("--gamma", type=float, default=2.2, help="Used by gamma and toe-gamma curves only")
     parser.add_argument("--shadow-lift", type=float, default=0.0)
     parser.add_argument("--shoulder", type=float, default=0.0)
-    parser.add_argument("--rolloff", "--roll-off", dest="rolloff", type=float, default=0.0)
+    parser.add_argument("--rolloff", "--roll-off", dest="rolloff", type=float, default=0.0, help="Highlight roll-off compression strength. Any non-zero value uses a smooth shoulder; 1.0 is strongest.")
+    parser.add_argument("--rolloff-start", "--roll-off-start", dest="rolloff_start", help="Compact highlight roll-off start: 0..100 means percent of output ceiling; 101+ means absolute nits")
+    parser.add_argument("--rolloff-start-percent", "--roll-off-start-percent", dest="rolloff_start_percent", type=float, default=75.0, help="Legacy explicit percent start; ignored when --rolloff-start is set")
+    parser.add_argument("--rolloff-start-nits", "--roll-off-start-nits", dest="rolloff_start_nits", type=float, help="Legacy explicit nits start; independent from --nit-cap and ignored when --rolloff-start is set")
     parser.add_argument("--peak-nits-override", type=float, help="Optional absolute reference peak in nits. When omitted, the brightest measured channel from lut_summary.json is used")
-    parser.add_argument("--nit-cap", type=float, help="Optional absolute nit cap referenced to the brightest measured channel peak. Bucket count remains unchanged")
+    parser.add_argument("--nit-cap", type=float, help="Optional absolute highlight ceiling in nits. Roll-off tone-maps into this cap; without roll-off, highlights are clipped to the cap without scaling the lower curve")
     parser.add_argument("--exclude-white", action="store_true", default=False, help="Exclude the white (W) channel from export and auto-cap nits to the brightest RGB channel")
+    parser.add_argument("--distance-correction", action="store_true", default=False, help="Apply inverse-square distance Y preprocessing before transfer curve generation")
+    parser.add_argument("--bench-distance-inches", "--bench-distance-in", type=float, default=4.875, help="Measurement bench LED-to-wall distance in inches")
+    parser.add_argument("--target-distance-inches", "--target-distance-in", "--implementation-distance-inches", "--implementation-distance-in", type=float, default=6.875, help="Actual implementation LED-to-wall distance in inches")
+    parser.add_argument("--raw-inverse-square", "--disable-distance-proportional", dest="distance_proportional", action="store_false", default=True, help="Use raw inverse-square loss instead of brightness-proportional distance loss")
+    parser.add_argument("--distance-proportional-strength", type=float, default=1.0, help="Blend strength for brightness-proportional distance loss; 0 behaves like raw inverse-square")
     parser.add_argument("--selection", choices=["floor", "nearest"], default="floor")
     for ch in CHANNELS:
         suffix = ch.lower()
@@ -7325,6 +7802,9 @@ def _add_transfer_curve_parser_args(parser):
         parser.add_argument(f"--shadow-lift-{suffix}", dest=f"shadow_lift_{suffix}", type=float)
         parser.add_argument(f"--shoulder-{suffix}", dest=f"shoulder_{suffix}", type=float)
         parser.add_argument(f"--rolloff-{suffix}", f"--roll-off-{suffix}", dest=f"rolloff_{suffix}", type=float)
+        parser.add_argument(f"--rolloff-start-{suffix}", f"--roll-off-start-{suffix}", dest=f"rolloff_start_{suffix}")
+        parser.add_argument(f"--rolloff-start-percent-{suffix}", f"--roll-off-start-percent-{suffix}", dest=f"rolloff_start_percent_{suffix}", type=float)
+        parser.add_argument(f"--rolloff-start-nits-{suffix}", f"--roll-off-start-nits-{suffix}", dest=f"rolloff_start_nits_{suffix}", type=float)
 
 
 def _collect_transfer_channel_cli_overrides(args):
@@ -7336,7 +7816,10 @@ def _collect_transfer_channel_cli_overrides(args):
         shadow_lift = getattr(args, f"shadow_lift_{suffix}", None)
         shoulder = getattr(args, f"shoulder_{suffix}", None)
         rolloff = getattr(args, f"rolloff_{suffix}", None)
-        if curve is None and gamma is None and shadow_lift is None and shoulder is None and rolloff is None:
+        rolloff_start = getattr(args, f"rolloff_start_{suffix}", None)
+        rolloff_start_percent = getattr(args, f"rolloff_start_percent_{suffix}", None)
+        rolloff_start_nits = getattr(args, f"rolloff_start_nits_{suffix}", None)
+        if curve is None and gamma is None and shadow_lift is None and shoulder is None and rolloff is None and rolloff_start is None and rolloff_start_percent is None and rolloff_start_nits is None:
             continue
         cfg = {}
         if curve is not None:
@@ -7349,6 +7832,12 @@ def _collect_transfer_channel_cli_overrides(args):
             cfg["shoulder"] = shoulder
         if rolloff is not None:
             cfg["rolloff"] = rolloff
+        if rolloff_start is not None:
+            cfg["rolloff_start"] = rolloff_start
+        if rolloff_start_percent is not None:
+            cfg["rolloff_start_percent"] = rolloff_start_percent
+        if rolloff_start_nits is not None:
+            cfg["rolloff_start_nits"] = rolloff_start_nits
         channel_configs[ch] = cfg
     return channel_configs or None
 
@@ -8152,11 +8641,19 @@ def main():
             shadow_lift=args.shadow_lift,
             shoulder=args.shoulder,
             rolloff=args.rolloff,
+            rolloff_start=args.rolloff_start,
+            rolloff_start_percent=args.rolloff_start_percent,
+            rolloff_start_nits=args.rolloff_start_nits,
             selection=args.selection,
             channel_configs=channel_configs,
             peak_nits_override=args.peak_nits_override,
             nit_cap=args.nit_cap,
             exclude_white=args.exclude_white,
+            distance_correction=args.distance_correction,
+            bench_distance_inches=args.bench_distance_inches,
+            target_distance_inches=args.target_distance_inches,
+            distance_proportional=args.distance_proportional,
+            distance_proportional_strength=args.distance_proportional_strength,
         )
         print(json.dumps({"ok": True, "out": args.out}, indent=2))
     elif args.cmd == "export-transfer-header":
@@ -8170,11 +8667,19 @@ def main():
             shadow_lift=args.shadow_lift,
             shoulder=args.shoulder,
             rolloff=args.rolloff,
+            rolloff_start=args.rolloff_start,
+            rolloff_start_percent=args.rolloff_start_percent,
+            rolloff_start_nits=args.rolloff_start_nits,
             selection=args.selection,
             channel_configs=channel_configs,
             peak_nits_override=args.peak_nits_override,
             nit_cap=args.nit_cap,
             exclude_white=args.exclude_white,
+            distance_correction=args.distance_correction,
+            bench_distance_inches=args.bench_distance_inches,
+            target_distance_inches=args.target_distance_inches,
+            distance_proportional=args.distance_proportional,
+            distance_proportional_strength=args.distance_proportional_strength,
         )
         print(json.dumps({"ok": True, "out": args.out}, indent=2))
     elif args.cmd == "export-luma-weights-json":
