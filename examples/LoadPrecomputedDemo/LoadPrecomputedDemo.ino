@@ -1,6 +1,8 @@
 // LoadPrecomputedDemo.ino
 // Demonstrates loading precomputed solver LUTs from an offline-generated
 // header — no solver or raw ladder data is compiled in.
+// Explicitly pins solver LUT mode and output color-order policy so the
+// runtime behavior is unambiguous when loading flash-backed LUTs.
 //
 // Usage:
 // 1. Generate a precomputed header with the Python tools:
@@ -32,6 +34,14 @@ using namespace TemporalBFI;
 static constexpr uint16_t LUT_SIZE = TemporalBFIRuntime::SOLVER_LUT_SIZE;
 static constexpr uint8_t  NUM_CH   = TemporalBFIPrecomputedSolverLUTs::NUM_CHANNELS;
 
+static constexpr LedColorOrder colorOrderForChannels(uint8_t channels) {
+    return (channels <= 3u)
+        ? LedColorOrder::GRB
+        : (channels == 4u ? LedColorOrder::GRBW : LedColorOrder::GRBW1W2);
+}
+
+static constexpr LedColorOrder PRECOMP_COLOR_ORDER = colorOrderForChannels(NUM_CH);
+
 // Runtime buffers — sized to match the precomputed header.
 static uint8_t  solverValueLUT[NUM_CH * LUT_SIZE];
 static uint8_t  solverBFILUT  [NUM_CH * LUT_SIZE];
@@ -51,6 +61,11 @@ void setup() {
     solver.attachLUTs(solverValueLUT, solverBFILUT, solverFloorLUT,
                       nullptr, LUT_SIZE);
 
+    // Keep precomputed behavior explicit: per-channel LUT storage and a
+    // color-order policy that matches the loaded channel count.
+    solver.setSolverLUTMode(SolverLUTMode::PerChannel);
+    solver.setLedColorOrder(PRECOMP_COLOR_ORDER);
+
     // Load from the precomputed flash arrays — no on-device computation.
     uint32_t t0 = micros();
     solver.loadPrecomputed(
@@ -63,6 +78,8 @@ void setup() {
     uint32_t elapsed = micros() - t0;
 
     Serial.print("Load time:            "); Serial.print(elapsed); Serial.println(" us");
+    Serial.print("Color order mode:     "); Serial.println((int)PRECOMP_COLOR_ORDER);
+    Serial.print("Solver LUT mode:      "); Serial.println("PerChannel");
 
     size_t totalBytes = (size_t)NUM_CH * LUT_SIZE * 3u;  // value + bfi + floor
     Serial.print("Total LUT memory:     "); Serial.print((unsigned long)totalBytes); Serial.println(" bytes");

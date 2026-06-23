@@ -4,6 +4,8 @@
 
 The current GUI is more than a simple capture runner. It now supports manual Fill8 / Blend8 / Fill16 rendering, resumable capture plans, spotread preset management, a UDP sparse-capture bridge for external builders, and an integrated LUT / FastLED analytical verifier with trilinear or tetrahedral interpolation, target-gamut selection, transfer selection, out-of-hull projection, and pass/fail CSV export.
 
+The measured multi-emitter 3D LUT builder has grown into its own standalone project. This README keeps the host-side capture, verifier, and TCAL protocol details local, while the broader model-builder workflow lives in [Multi-Emitter-Color-Correction-3DLUT-Builder](https://github.com/JChalka/Multi-Emitter-Color-Correction-3DLUT-Builder).
+
 ## Requirements
 
 - Python 3.10+
@@ -37,7 +39,7 @@ The GUI has four main roles:
 
 1. **Manual render host** — send Fill8, Blend8, or Fill16 states to the Teensy, commit them, control phase display, and run one-off measurements.
 2. **Capture plan runner** — import or build CSV measurement plans, execute row × repeat captures, save measurement CSVs, and resume interrupted runs from `.progress.json` files.
-3. **Sparse-capture bridge** — run a local UDP JSON server so external tools can ask the host to render RGBW16 patches and optionally capture them with the colorimeter.
+3. **Sparse-capture bridge** — run a local UDP JSON server so external tools, including the standalone [Multi-Emitter-Color-Correction-3DLUT-Builder](https://github.com/JChalka/Multi-Emitter-Color-Correction-3DLUT-Builder), can ask the host to render RGBW16 patches and optionally capture them with the colorimeter.
 4. **Verifier** — load an RGBW 3D LUT or use the firmware's analytical solver, measure a named/generated patch set, compare measured xy against expected source xy, and export verification results.
 
 ## GUI Layout
@@ -52,6 +54,8 @@ The GUI has four main roles:
 | **Hello** | Sends the TCAL hello request and logs the device response. |
 | **Ping** | Sends a ping request and logs the response. |
 | **Get State** | Requests the current render state from the firmware. |
+| **Device output mode** | Selects the logical output mode requested from compatible firmware: RGB, RGBW, or RGBWW/RGBCCT. Unsupported physical targets return an explicit unsupported-mode status. |
+| **Apply output mode** | Sends `OP_SET_OUTPUT_MODE` to the device and updates the displayed output-mode status from the response. |
 
 ### UDP capture server
 
@@ -134,10 +138,13 @@ The manual panel can render quick patches without a CSV plan. It has two input t
 | **Floor R / G / B / W** | Blend8 lower/previous values. |
 | **BFI R / G / B / W** | Per-channel BFI insertion counts. Current firmware constants expose 0–4 in the GUI. |
 | **R16 / G16 / B16 / W16** | True16 Fill16 patch values. Moving these also updates the 8-bit preview values. |
+| **W2 16** | Optional second white / CCT channel used only by the RGBWW/RGBCCT direct-output opcode. The host does not fold W2 into W. |
 | **Phase mode** | Auto lets the Teensy cycle phases. Manual lets the host force a phase index. |
 | **Phase index** | Manual phase value. The GUI supports the full phase-control range exposed by the firmware constant. |
 | **Apply phase** | Sends the current manual phase index. |
 | **Send State** | Sends the selected Fill8 / Blend8 / Fill16 state to the firmware. |
+| **Direct RGBW16** | Sends the current R16/G16/B16/W16 values through the direct RGBW16 opcode where supported. |
+| **Direct RGBWW16** | Sends R16/G16/B16/W16/W2 16 through the RGBWW/RGBCCT direct opcode. Current 4-channel ObjectFLED targets reject this with unsupported-mode status. |
 | **Commit** | Latches the currently staged state into the render pipeline. |
 | **Clear** | Sends the firmware clear command. |
 | **Measure Once** | Renders the manual state, commits it, waits for settling, runs `spotread`, and writes a `single_measure_<timestamp>.json` artifact. |
@@ -265,9 +272,20 @@ The summary loader looks for settings such as `gamut`, `input_gamut`, `input_tra
 | **Interp** | `tetrahedral`, `trilinear` | Interpolation method used for `.npy` LUT lookup. |
 | **Output** | `3D LUT`, `FastLED analytical MCU` | Chooses whether RGB input is converted to RGBW by the loaded LUT or by the firmware analytical solver. |
 | **Model** | `sub-gamut`, `lp_legacy` | Analytical model requested from the MCU when using **FastLED analytical MCU** output. |
+| **Dual edge** | `y_correct_clip`, `rolloff_after_clip`, `scale_to_full_endpoint` | Dual-channel edge policy sent with analytical RGB16 requests when the firmware supports the extended payload. |
 | **Target gamut** | `summary/native`, `rec709`, `rec2020`, `dci-p3`, `adobe-rgb` | Expected source chromaticity model. |
 | **Transfer** | `linear`, `gamut` | Whether verifier RGB inputs are treated as linear-light or decoded using the named gamut's transfer assumption. |
 | **Project OOH xy** | on/off | Projects out-of-hull named-gamut targets into the measured LED/model hull before scoring. |
+
+### Diode profile controls
+
+The verifier can use a diode basis from a loaded LUT summary, measure a basis locally, or exchange a compact `DiodeProfile` with the FastLED analytical verifier firmware.
+
+| Control | Purpose |
+|---------|---------|
+| **Fetch Teensy DiodeProfile** | Requests the compiled/runtime RGBW diode profile from compatible analytical firmware using `OP_GET_DIODE_PROFILE`. |
+| **Send DiodeProfile to Teensy** | Encodes the currently loaded or measured RGBW basis as a DPRF q1e6 payload and sends it with `OP_SET_DIODE_PROFILE`. |
+| **Measure diode basis now** | Measures local R/G/B/W basis states with the colorimeter when a compatible summary is missing or a fresh basis is needed. |
 
 ### Patch sets
 
@@ -284,7 +302,7 @@ When **Output** is `3D LUT`, the verifier:
 1. Generates an RGB16 verifier patch.
 2. Looks up the RGBW16 output in the loaded `(N,N,N,4)` LUT.
 3. Uses either tetrahedral or trilinear interpolation.
-4. Sends the resulting RGBW16 Fill16 state to the firmware.
+4. Sends the resulting RGBW16 state to the firmware using the direct RGBW16 opcode when available, falling back to legacy Fill16 behavior for older firmware.
 5. Measures the rendered output with `spotread`.
 6. Computes expected xy and dE.
 
@@ -292,7 +310,7 @@ Tetrahedral interpolation follows the standard six-tetrahedra cube split. This i
 
 ### FastLED analytical MCU output path
 
-When **Output** is `FastLED analytical MCU`, the verifier does not require a loaded `.npy` LUT. Instead, it sends the RGB16 input plus analytical model ID to the firmware using the analytical RGB16 opcode. The MCU returns the solved RGBW16 output and path metadata, and the GUI measures that rendered state.
+When **Output** is `FastLED analytical MCU`, the verifier does not require a loaded `.npy` LUT. Instead, it sends the RGB16 input, analytical model ID, and optional dual-edge policy to the firmware using the analytical RGB16 opcode. The MCU returns the solved RGBW16 output, solve-path metadata, active output mode, and debug candidates when supported, and the GUI measures that rendered state.
 
 The results table and CSV include:
 
@@ -301,6 +319,7 @@ The results table and CSV include:
 - `analytical_strict_ok`
 - `analytical_strict_rgbw16`
 - `analytical_lp_rgbw16`
+- `analytical_dual_edge_policy` when present
 - MCU solved RGBW16 values
 
 This makes the tab useful for comparing a generated 3D LUT against the firmware's current analytical solver without rebuilding a full cube.
@@ -370,36 +389,181 @@ The table shows:
 
 ## Serial Protocol Summary
 
-Communication uses a binary framed protocol over USB serial:
+The GUI speaks the TCAL frame protocol over USB serial. The same frame envelope is shared by the direct Teensy temporal calibration companion and the FastLED analytical verifier endpoint.
 
 ```text
 [TCAL] [kind:1] [len_hi:1] [len_lo:1] [payload:0..128] [crc:1]
 ```
 
+The CRC is the XOR of `kind`, `len_hi`, `len_lo`, and every payload byte. Payloads are capped at 128 bytes.
+
+### Frame kinds
+
 | Kind | Direction | Purpose |
 |------|-----------|---------|
-| `0x01` / `0x81` | Host → Teensy / response | Hello handshake. |
-| `0x02` / `0x82` | Host → Teensy / response | Ping / pong. |
-| `0x30` / `0xB0` | Host → Teensy / response | Calibration command / acknowledgement. |
-| `0x90` | Teensy → Host | Device log message. |
+| `0x01` / `0x81` | Host → device / response | Hello handshake. The response payload is the sketch identity string. |
+| `0x02` / `0x82` | Host → device / response | Ping / pong echo test. |
+| `0x30` / `0xB0` | Host → device / response | Calibration, render, analytical, and output-mode command / response. |
+| `0x90` | Device → host | Device log message. |
 
-Calibration command opcodes currently used or recognized by the host:
+### Device roles
 
-| Opcode | Name | Action |
-|--------|------|--------|
-| `0x00` | Get State | Query current firmware render state. |
-| `0x20` | Set Render Enabled | Firmware render enable/disable command. |
-| `0x21` | Set Fill | Set 8-bit RGBW values plus BFI fields. |
-| `0x23` | Clear | Clear output. |
-| `0x24` | Set Phase | Set manual phase index. |
-| `0x26` | Commit | Latch staged render state. |
-| `0x28` | Set Phase Mode | Auto or manual phase mode. |
-| `0x29` | Set Solver Enabled | Enable/disable firmware solver mode for plan runs. |
-| `0x2A` | Set Temporal Blend | Send Blend8 lower/upper/BFI state. |
-| `0x2B` | Set Fill16 | Send direct 16-bit RGBW target values. |
-| `0x2C` | Set Analytical RGB16 | Ask the MCU analytical model to solve an RGB16 input to RGBW16, used by the verifier. |
+Two current firmware roles use the shared envelope:
 
-The host parses extended calibration responses when available, including solved RGBW16, input RGB16, analytical model ID, analytical solve path, strict candidate, and LP candidate fields.
+| Firmware role | Identity payload | Purpose |
+|---------------|------------------|---------|
+| `Teensy_Temporal_Calibration` companion | `teensy-cal-direct-v1` | Direct-output companion. The host performs LUT / verifier logic and sends final RGBW/RGBWW targets. It does not expose diode-profile editing opcodes. |
+| `RGBW_Analytical_FastLED` verifier | `teensy-rgbw-analytic-v2` | Analytical verification endpoint. The host can send RGB16 inputs for MCU-side solving, direct RGBW/RGBWW analytical targets, and diode-profile get/set payloads. |
+
+### Shared status values
+
+| Status | Value | Meaning |
+|--------|------:|---------|
+| `STATUS_OK` | `0x00` | Request accepted. |
+| `STATUS_BAD_PAYLOAD` | `0x01` | Payload too short or malformed for the opcode. |
+| `STATUS_BAD_OPCODE` | `0x02` | Unknown opcode. |
+| `STATUS_UNSUPPORTED_OUTPUT_MODE` | `0x04` | Requested logical output mode cannot be represented by the active physical target. |
+
+The FastLED analytical verifier also reports:
+
+| Status | Value | Meaning |
+|--------|------:|---------|
+| `STATUS_SOLVE_FAILED` | `0x03` | Analytical strict-subgamut solve failed. |
+| `STATUS_BAD_PROFILE` | `0x05` | Diode-profile signature, version, format, or range validation failed. |
+
+### Output modes
+
+The host tracks the device's active logical output mode, supported-mode bitmask, physical output channel count, and active logical channel count when those response fields are available.
+
+| Mode | Value | Meaning |
+|------|------:|---------|
+| `OUTPUT_MODE_RGB` | `0x00` | Three logical output channels. |
+| `OUTPUT_MODE_RGBW` | `0x01` | Four logical output channels. |
+| `OUTPUT_MODE_RGBWW` | `0x02` | Five logical RGBWW / RGBCCT-style channels. |
+
+Current 4-channel ObjectFLED targets reject RGBWW/RGBCCT requests with `STATUS_UNSUPPORTED_OUTPUT_MODE`. W2 is not folded into W.
+
+### Shared base opcodes
+
+These opcodes are used by both current firmware roles unless noted by the target firmware response.
+
+| Opcode | Name | Payload after opcode | Response / behavior |
+|--------|------|----------------------|---------------------|
+| `0x00` | `OP_GET_STATE` | none | Current state response. |
+| `0x20` | `OP_SET_RENDER_ENABLED` | byte 1: nonzero enables render output | Current state response. |
+| `0x21` | `OP_SET_FILL` | bytes 1..4: 8-bit R,G,B,W; bytes 5..8: BFI R,G,B,W | Sets Fill8-style values and BFI fields. |
+| `0x23` | `OP_CLEAR` | none | Clears output buffers and state. |
+| `0x24` | `OP_SET_PHASE` | byte 1: explicit temporal tick / phase value | Sets manual phase index. |
+| `0x26` | `OP_COMMIT` | none | Acknowledge/latch point for the currently staged render state. |
+| `0x28` | `OP_SET_PHASE_MODE` | byte 1: `0x00` auto, `0x01` manual | Selects automatic or host-forced phase control. |
+| `0x29` | `OP_SET_SOLVER_ENABLED` | byte 1: nonzero enables solver mode | Enables/disables firmware solver mode for plan execution. |
+| `0x2A` | `OP_SET_TEMPORAL_BLEND` | bytes 1..4: lower R,G,B,W; bytes 5..8: upper R,G,B,W; bytes 9..12: BFI R,G,B,W | Sends a Blend8 lower/upper/BFI state. |
+| `0x2B` | `OP_SET_FILL16` | u16be R,G,B,W at offsets 1,3,5,7 | Sends 16-bit RGBW targets. Unsupported status may be returned if the active target mode cannot represent the requested channels. |
+| `0x2E` | `OP_SET_OUTPUT_MODE` | byte 1: `OUTPUT_MODE_*` | Requests RGB, RGBW, or RGBWW logical output mode. |
+
+### FastLED analytical verifier opcodes
+
+These are specific to the FastLED analytical verifier endpoint.
+
+| Opcode | Name | Payload after opcode | Behavior |
+|--------|------|----------------------|----------|
+| `0x2C` | `OP_SET_ANALYTICAL_RGB16` | byte 1: analytical model; u16be R,G,B at offsets 2,4,6; optional byte 8: dual-edge policy | Runs analytical RGB → RGBW solving. In RGB output mode, the sketch renders input RGB directly with W=0. In RGBW output mode, it renders the solved RGBW. Strict-subgamut failures return `STATUS_SOLVE_FAILED`. |
+| `0x2D` | `OP_GET_DIODE_PROFILE` | none | Returns the compact RGBW diode profile payload. |
+| `0x2F` | `OP_SET_ANALYTICAL_RGBW16` | u16be R,G,B,W at offsets 1,3,5,7 | Applies direct analytical RGBW values only when output mode is RGBW. |
+| `0x30` | `OP_SET_ANALYTICAL_RGBWW16` | u16be R,G,B,W1,W2 at offsets 1,3,5,7,9 | Currently rejected on the RGBW ObjectFLED target. W2 is preserved as a separate logical field and is not folded. |
+| `0x31` | `OP_SET_DIODE_PROFILE` | DPRF diode-profile payload | Validates and applies a host-provided RGBW diode profile, rebuilds the FastLED colorimetric cache, clears analytical debug state, and returns a compact diode-profile response. |
+
+Analytical model values:
+
+| Value | Meaning |
+|------:|---------|
+| `0x00` | Strict sub-gamut model. |
+| `0x01` | Legacy LP model. |
+
+Dual-edge policy values:
+
+| Value | Meaning |
+|------:|---------|
+| `0x00` | Y-correct clip. |
+| `0x01` | Rolloff after clip. |
+| `0x02` | Scale to full endpoint. |
+
+### Direct-output companion opcodes
+
+The temporal calibration companion interprets the overlapping `0x2F` and `0x30` opcode values as direct-output requests rather than analytical requests.
+
+| Opcode | Name | Payload after opcode | Behavior |
+|--------|------|----------------------|----------|
+| `0x2F` | `OP_SET_DIRECT_RGBW16` | u16be R,G,B,W at offsets 1,3,5,7 | Applies direct RGBW output values when the configured physical target supports RGBW. RGB-only targets reject nonzero W. |
+| `0x30` | `OP_SET_DIRECT_RGBWW16` | u16be R,G,B,W1,W2 at offsets 1,3,5,7,9 | Rejected unless a future native 5-channel ObjectFLED target is available. W2 is never folded into W. |
+
+### FastLED analytical response layout
+
+The analytical verifier returns a 64-byte calibration response when the extended state is available.
+
+| Offset | Field |
+|-------:|-------|
+| 0 | Echoed opcode. |
+| 1 | Status. |
+| 2 | Render enabled flag. |
+| 3 | Manual phase flag. |
+| 4 | Current temporal tick low byte. |
+| 5..8 | First pixel upper R,G,B,W response-order bytes. |
+| 9..12 | First pixel BFI R,G,B,W. |
+| 17 | Solver enabled flag. |
+| 18..25 | Last solved R,G,B,W as u16be. |
+| 26..31 | Last input R,G,B as u16be. |
+| 32 | Analytical model. |
+| 33 | Analytical solve path. |
+| 34 | Strict solve OK flag. |
+| 35..42 | Strict solved R,G,B,W as u16be. |
+| 43..50 | Legacy LP solved R,G,B,W as u16be. |
+| 51 | Dual-edge policy. |
+| 52 | Active output mode. |
+| 53 | Supported output mode bitmask. |
+| 54 | Physical ObjectFLED output channel count. |
+| 55 | Active logical channel count. |
+| 56..59 | Last input W and W2 as u16be. |
+| 60..61 | Last solved W2 as u16be. |
+| 62 | Fold/stub flag, currently `0` because unsupported modes are rejected. |
+| 63 | Response extension version, currently `1`. |
+
+Analytical solve-path values parsed by the host are `none`, `strict_sub_gamut`, `lp_legacy`, and `strict_failed`.
+
+### Temporal calibration companion response layout
+
+The direct-output companion returns a 32-byte calibration response when the extended state is available.
+
+| Offset | Field |
+|-------:|-------|
+| 0 | Echoed opcode. |
+| 1 | Status. |
+| 2 | Render enabled flag. |
+| 3 | Manual phase flag. |
+| 4 | Current temporal tick low byte. |
+| 5..8 | First pixel upper R,G,B,W response-order bytes. |
+| 9..12 | First pixel BFI R,G,B,W. |
+| 17 | Solver enabled flag. |
+| 18 | Active output mode. |
+| 19 | Supported output mode bitmask. |
+| 20 | Physical ObjectFLED output channel count. |
+| 21 | Active logical channel count. |
+| 22 | Compile-time target output mode. |
+| 23 | Fold/stub flag, currently `0` because unsupported modes are rejected. |
+| 29 | Response extension version, currently `1`. |
+
+### Diode profile payload
+
+`OP_GET_DIODE_PROFILE` and `OP_SET_DIODE_PROFILE` use a compact DPRF block for RGBW diode basis exchange.
+
+| Field | Meaning |
+|-------|---------|
+| Signature | ASCII `DPRF`; in responses it follows opcode/status alignment, while set requests place it immediately after the opcode. |
+| Version | `1`. |
+| Format | `1`, meaning unsigned 32-bit big-endian values scaled by 1e6. |
+| Values | 12 u32be q1e6 values in channel order R,G,B,W. Each channel stores x, y, and relative Y. |
+
+Set-profile validation requires each x and y to be greater than 0 and less than 1, `x + y < 1`, and relative Y greater than 0. Accepted profiles rebuild the analytical firmware's colorimetric cache immediately.
 
 ## Typical Workflows
 
@@ -453,5 +617,8 @@ This path is useful when checking whether the MCU-side analytical solver matches
 - The verifier's dE is chromaticity-only and does not judge luminance accuracy.
 - `summary/native` expected xy requires a compatible summary JSON with RGB basis data.
 - Model-style out-of-hull projection requires RGBW basis data in the summary; otherwise the verifier falls back to nearest xy projection onto the RGB triangle.
+- RGBWW/RGBCCT is documented in the protocol and exposed for host-side testing, but current 4-channel ObjectFLED targets reject it until native 5-channel output support lands.
+- W2 is intentionally kept separate and is never folded into W by the host.
+- Diode-profile get/set is scoped to the FastLED analytical verifier endpoint; the direct temporal calibration companion does not expose diode-profile editing opcodes.
 - The UDP server serializes measurement requests because both the serial device and colorimeter are shared single resources.
 - The GUI intentionally keeps raw Argyll `stdout` and `stderr` in capture artifacts so parsing changes can be audited later.

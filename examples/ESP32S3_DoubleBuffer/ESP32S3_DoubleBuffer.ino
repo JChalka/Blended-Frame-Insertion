@@ -1,5 +1,7 @@
 // ESP32S3_DoubleBuffer.ino
 // Demonstrates double-buffered BFI rendering on ESP32-S3 with FastLED.
+// Uses consolidated commit/render APIs plus explicit color-order and
+// solver-LUT mode configuration for migration-clean behavior.
 //
 // Architecture:
 //   Core 0 — Solve task: generates 16-bit color, solves to BFI frames.
@@ -33,6 +35,12 @@ static constexpr uint16_t LED_COUNT    = 64;     // total pixel count
 static constexpr uint8_t  DATA_PIN     = 2;      // WS2812B data pin
 static constexpr uint8_t  CYCLE_LEN    = 5;      // BFI phases per frame (0-4)
 static constexpr uint16_t LUT_SIZE     = TemporalBFIRuntime::SOLVER_LUT_SIZE;
+static constexpr uint8_t  CHANNELS      = 3;      // RGB
+
+static constexpr RenderOptions RENDER_OPTIONS = {
+    LedColorOrder::GRB,
+    BfiMapStorageMode::Separate,
+};
 
 // ---------------------------------------------------------------------------
 // Solver LUTs — allocated in PSRAM at startup
@@ -129,15 +137,25 @@ static void generatePattern() {
 // Solve all pixels and commit to the solve-side BFI frame buffers.
 // ---------------------------------------------------------------------------
 static void solveAndCommitAll() {
+    BfiMapWriteView bfiMaps;
+    bfiMaps.bfiMapG = bfiG;
+    bfiMaps.bfiMapR = bfiR;
+    bfiMaps.bfiMapB = bfiB;
+
     for (uint16_t i = 0; i < LED_COUNT; ++i) {
         EncodedState stG = solver.solve(srcG[i], 0);
         EncodedState stR = solver.solve(srcR[i], 1);
         EncodedState stB = solver.solve(srcB[i], 2);
 
-        SolverRuntime::commitPixelRGB(
+        EncodedState states[3] = {stG, stR, stB};
+
+        SolverRuntime::commitPixel(
             upperFrame, floorFrame,
-            bfiG, bfiR, bfiB,
-            i, stG, stR, stB);
+            bfiMaps,
+            i,
+            states,
+            CHANNELS,
+            RENDER_OPTIONS);
     }
 }
 
@@ -195,10 +213,16 @@ static void swapBuffers() {
 
 // Render one BFI sub-frame from the display-side buffers into the CRGB array.
 static void renderPhase(uint8_t phase) {
-    SolverRuntime::renderSubpixelBFI_RGB(
+    BfiMapView bfiMaps;
+    bfiMaps.bfiMapG = dispBfiG;
+    bfiMaps.bfiMapR = dispBfiR;
+    bfiMaps.bfiMapB = dispBfiB;
+
+    SolverRuntime::renderLoopStatic(
         dispUpperFrame, dispFloorFrame,
-        dispBfiG, dispBfiR, dispBfiB,
-        displayBuf, LED_COUNT, phase);
+        bfiMaps,
+        displayBuf, LED_COUNT, phase,
+        RENDER_OPTIONS);
 
     // Map internal GRB byte order → CRGB (RGB memory order).
     for (uint16_t i = 0; i < LED_COUNT; ++i) {
@@ -217,23 +241,25 @@ void setup() {
     delay(500);
 
     // --- Allocate PSRAM buffers ---
-    solverValueLUT = (uint8_t*)ps_malloc(4 * LUT_SIZE);
-    solverBFILUT   = (uint8_t*)ps_malloc(4 * LUT_SIZE);
-    solverFloorLUT = (uint8_t*)ps_malloc(4 * LUT_SIZE);
+    solverValueLUT = (uint8_t*)ps_malloc(CHANNELS * LUT_SIZE);
+    solverBFILUT   = (uint8_t*)ps_malloc(CHANNELS * LUT_SIZE);
+    solverFloorLUT = (uint8_t*)ps_malloc(CHANNELS * LUT_SIZE);
 
-    upperFrame     = (uint8_t*)ps_malloc(LED_COUNT * 3);
-    floorFrame     = (uint8_t*)ps_malloc(LED_COUNT * 3);
-    dispUpperFrame = (uint8_t*)ps_malloc(LED_COUNT * 3);
-    dispFloorFrame = (uint8_t*)ps_malloc(LED_COUNT * 3);
+    upperFrame     = (uint8_t*)ps_malloc(LED_COUNT * CHANNELS);
+    floorFrame     = (uint8_t*)ps_malloc(LED_COUNT * CHANNELS);
+    dispUpperFrame = (uint8_t*)ps_malloc(LED_COUNT * CHANNELS);
+    dispFloorFrame = (uint8_t*)ps_malloc(LED_COUNT * CHANNELS);
 
-    memset(upperFrame,     0, LED_COUNT * 3);
-    memset(floorFrame,     0, LED_COUNT * 3);
-    memset(dispUpperFrame, 0, LED_COUNT * 3);
-    memset(dispFloorFrame, 0, LED_COUNT * 3);
+    memset(upperFrame,     0, LED_COUNT * CHANNELS);
+    memset(floorFrame,     0, LED_COUNT * CHANNELS);
+    memset(dispUpperFrame, 0, LED_COUNT * CHANNELS);
+    memset(dispFloorFrame, 0, LED_COUNT * CHANNELS);
 
     // --- Initialise solver ---
     solver.attachLUTs(solverValueLUT, solverBFILUT, solverFloorLUT, nullptr, LUT_SIZE);
-    solver.precompute(TemporalTrue16BFIPolicySolver::encodeStateFrom16);
+    solver.setLedColorOrder(RENDER_OPTIONS.colorOrder);
+    solver.setSolverLUTMode(SolverLUTMode::PerChannel);
+    solver.precompute(TemporalTrue16BFIPolicySolver::encodeStateFrom16, CHANNELS);
 
     // --- Initialise FastLED ---
     FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, LED_COUNT);

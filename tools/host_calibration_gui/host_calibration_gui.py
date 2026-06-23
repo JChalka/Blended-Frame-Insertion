@@ -24,7 +24,7 @@ import serial.tools.list_ports
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-APP_TITLE = "Temporal RGBW Calibration Host v7.5.4"
+APP_TITLE = "Temporal RGBW Calibration Host v7.5.5"
 DEFAULT_SERIAL_BAUD = 30000000
 DEFAULT_ARTIFACT_DIR = Path(__file__).resolve().parent / "captures"
 FRAME_HEADER = b"TCAL"
@@ -50,6 +50,40 @@ OP_SET_TEMPORAL_BLEND = 0x2A
 OP_SET_FILL16 = 0x2B
 OP_SET_ANALYTICAL_RGB16 = 0x2C
 OP_GET_DIODE_PROFILE = 0x2D
+OP_SET_OUTPUT_MODE = 0x2E
+# 0x2F/0x30 are shared by the two Phase-8 sketches.
+# FastLED analytical treats them as analytical direct RGBW/RGBWW requests;
+# the temporal companion treats them as direct-output RGBW/RGBWW requests.
+OP_SET_DIRECT_RGBW16 = 0x2F
+OP_SET_ANALYTICAL_RGBW16 = OP_SET_DIRECT_RGBW16
+OP_SET_DIRECT_RGBWW16 = 0x30
+OP_SET_ANALYTICAL_RGBWW16 = OP_SET_DIRECT_RGBWW16
+OP_SET_DIODE_PROFILE = 0x31
+
+STATUS_OK = 0x00
+STATUS_BAD_PAYLOAD = 0x01
+STATUS_BAD_OPCODE = 0x02
+STATUS_SOLVE_FAILED = 0x03
+STATUS_UNSUPPORTED_OUTPUT_MODE = 0x04
+STATUS_BAD_PROFILE = 0x05
+STATUS_NAMES = {
+    STATUS_OK: "OK",
+    STATUS_BAD_PAYLOAD: "BAD_PAYLOAD",
+    STATUS_BAD_OPCODE: "BAD_OPCODE",
+    STATUS_SOLVE_FAILED: "SOLVE_FAILED",
+    STATUS_UNSUPPORTED_OUTPUT_MODE: "UNSUPPORTED_OUTPUT_MODE",
+    STATUS_BAD_PROFILE: "BAD_PROFILE",
+}
+
+OUTPUT_MODE_RGB = 0x00
+OUTPUT_MODE_RGBW = 0x01
+OUTPUT_MODE_RGBWW = 0x02
+OUTPUT_MODE_CHOICES = {
+    "RGB": OUTPUT_MODE_RGB,
+    "RGBW": OUTPUT_MODE_RGBW,
+    "RGBWW/RGBCCT": OUTPUT_MODE_RGBWW,
+}
+OUTPUT_MODE_NAMES = {value: key for key, value in OUTPUT_MODE_CHOICES.items()}
 
 PHASE_MODE_AUTO = 0
 PHASE_MODE_MANUAL = 1
@@ -747,6 +781,25 @@ def _u32_be_from_payload(payload: bytes | bytearray, offset: int) -> int:
             int(payload[offset + 3]))
 
 
+def _pack_u32_be_q1e6(value: float) -> bytes:
+    scaled = int(round(float(value) * 1000000.0))
+    scaled = max(0, min(0xFFFFFFFF, scaled))
+    return bytes([
+        (scaled >> 24) & 0xFF,
+        (scaled >> 16) & 0xFF,
+        (scaled >> 8) & 0xFF,
+        scaled & 0xFF,
+    ])
+
+
+def _status_name(status: object) -> str:
+    try:
+        value = int(status)
+    except Exception:
+        return str(status)
+    return STATUS_NAMES.get(value, f"0x{value:02X}")
+
+
 def _decode_diode_profile_payload(payload: bytes | bytearray) -> dict[str, object] | None:
     """Decode Teensy DiodeProfile payloads returned by OP_GET_DIODE_PROFILE.
 
@@ -954,24 +1007,31 @@ class DirectSerialClient:
                 "phase": payload[4] if len(payload) > 4 else None,
                 "payload_hex": payload.hex(),
             }
-            if len(payload) >= 26:
+            payload_len = len(payload)
+            msg["payload_len"] = payload_len
+            op = msg.get("op")
+            is_diode_profile_response = op in (OP_GET_DIODE_PROFILE, OP_SET_DIODE_PROFILE)
+            is_analytical_state = (payload_len >= 64) or (payload_len >= 51 and not is_diode_profile_response)
+
+            # FastLED analytical verifier response, old 51/52-byte layout or new 64-byte layout.
+            if is_analytical_state and payload_len >= 26:
                 msg["solved_rgbw16"] = [
                     (payload[18] << 8) | payload[19],
                     (payload[20] << 8) | payload[21],
                     (payload[22] << 8) | payload[23],
                     (payload[24] << 8) | payload[25],
                 ]
-            if len(payload) >= 32:
+            if is_analytical_state and payload_len >= 32:
                 msg["input_rgb16"] = [
                     (payload[26] << 8) | payload[27],
                     (payload[28] << 8) | payload[29],
                     (payload[30] << 8) | payload[31],
                 ]
-            if len(payload) >= 33:
+            if is_analytical_state and payload_len >= 33:
                 msg["analytical_model"] = payload[32]
-            if len(payload) >= 34:
+            if is_analytical_state and payload_len >= 34:
                 msg["analytical_solve_path"] = payload[33]
-            if len(payload) >= 51 and msg.get("op") != OP_GET_DIODE_PROFILE:
+            if is_analytical_state and payload_len >= 51:
                 msg["analytical_strict_ok"] = payload[34]
                 msg["analytical_strict_rgbw16"] = [
                     (payload[35] << 8) | payload[36],
@@ -985,17 +1045,47 @@ class DirectSerialClient:
                     (payload[47] << 8) | payload[48],
                     (payload[49] << 8) | payload[50],
                 ]
-            if len(payload) >= 52 and msg.get("op") != OP_GET_DIODE_PROFILE:
+            if is_analytical_state and payload_len >= 52:
                 msg["analytical_dual_edge_policy"] = payload[51]
-            if msg.get("op") == OP_GET_DIODE_PROFILE:
+            if is_analytical_state and payload_len >= 64:
+                msg["active_output_mode"] = payload[52]
+                msg["supported_output_mode_bitmask"] = payload[53]
+                msg["physical_output_channel_count"] = payload[54]
+                msg["active_logical_channel_count"] = payload[55]
+                msg["last_input_w16"] = (payload[56] << 8) | payload[57]
+                msg["last_input_w2_16"] = (payload[58] << 8) | payload[59]
+                msg["last_solved_w2_16"] = (payload[60] << 8) | payload[61]
+                msg["fold_stub_flag"] = payload[62]
+                msg["response_extension_version"] = payload[63]
+
+            # Teensy temporal calibration companion Phase-8 state response.
+            if (not is_analytical_state) and (not is_diode_profile_response) and payload_len >= 30:
+                msg["solver_enabled"] = payload[17] if payload_len > 17 else None
+                msg["active_output_mode"] = payload[18]
+                msg["supported_output_mode_bitmask"] = payload[19]
+                msg["physical_output_channel_count"] = payload[20]
+                msg["active_logical_channel_count"] = payload[21]
+                msg["compile_time_target_output_mode"] = payload[22] if payload_len > 22 else None
+                msg["fold_stub_flag"] = payload[23] if payload_len > 23 else None
+                msg["response_extension_version"] = payload[29]
+
+            if is_diode_profile_response:
                 diode_profile = _decode_diode_profile_payload(payload)
                 if diode_profile is not None:
                     msg["diode_profile"] = diode_profile
             if msg["op"] is not None and msg["status"] is not None:
-                if msg.get("op") == OP_GET_DIODE_PROFILE and "diode_profile" in msg:
-                    self._log(f"[rx] diode profile status=0x{msg['status']:02X}")
+                status_text = _status_name(msg["status"])
+                mode_text = ""
+                if "active_output_mode" in msg:
+                    mode_name = OUTPUT_MODE_NAMES.get(int(msg["active_output_mode"]), f"mode{msg['active_output_mode']}")
+                    supported = int(msg.get("supported_output_mode_bitmask", 0))
+                    physical = msg.get("physical_output_channel_count")
+                    logical = msg.get("active_logical_channel_count")
+                    mode_text = f" mode={mode_name} supported=0x{supported:02X} phys={physical} logical={logical}"
+                if is_diode_profile_response and "diode_profile" in msg:
+                    self._log(f"[rx] diode profile op=0x{msg['op']:02X} status={status_text}{mode_text}")
                 else:
-                    self._log(f"[rx] cal op=0x{msg['op']:02X} status=0x{msg['status']:02X} phase={msg['phase']}")
+                    self._log(f"[rx] cal op=0x{msg['op']:02X} status={status_text} phase={msg['phase']}{mode_text}")
             else:
                 self._log(f"[rx] cal payload={payload.hex()}")
         else:
@@ -1367,6 +1457,9 @@ class App:
         self._verifier_ref_white_x_var = tk.DoubleVar(value=_VERIFIER_D65_XY[0])
         self._verifier_ref_white_y_var = tk.DoubleVar(value=_VERIFIER_D65_XY[1])
         self._verifier_auto_measure_basis_var = tk.BooleanVar(value=True)
+        self._device_output_mode_var = tk.StringVar(value="RGBW")
+        self._device_output_mode_status_var = tk.StringVar(value="device mode: unknown")
+        self.w2_16_var = tk.IntVar(value=0)
         self.build_ui()
         self.refresh_serial_ports()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -1417,6 +1510,17 @@ class App:
         ttk.Button(row, text="Ping", command=self.send_ping).pack(side="left", padx=4)
         ttk.Button(row, text="Get State", command=self.get_state).pack(side="left", padx=4)
 
+        mode_ctl_row = ttk.Frame(controls)
+        mode_ctl_row.pack(fill="x", padx=8, pady=(0, 6))
+        ttk.Label(mode_ctl_row, text="Device output mode").pack(side="left")
+        mode_combo = ttk.Combobox(
+            mode_ctl_row, textvariable=self._device_output_mode_var,
+            values=list(OUTPUT_MODE_CHOICES.keys()), state="readonly", width=14,
+        )
+        mode_combo.pack(side="left", padx=4)
+        ttk.Button(mode_ctl_row, text="Apply output mode", command=self.send_output_mode).pack(side="left", padx=4)
+        ttk.Label(mode_ctl_row, textvariable=self._device_output_mode_status_var).pack(side="left", padx=8)
+
         udp_row = ttk.Frame(controls)
         udp_row.pack(fill="x", padx=8, pady=6)
         ttk.Label(udp_row, text="UDP capture server").pack(side="left")
@@ -1465,8 +1569,9 @@ class App:
 
         left = ttk.Frame(mid)
         right = ttk.Frame(mid)
-        mid.add(left, weight=1)
-        mid.add(right, weight=4)
+        mid.add(left, weight=0)
+        mid.add(right, weight=1)
+        self.root.after(300, lambda: self._safe_sashpos(mid, 0, 355))
 
         self.build_render_panel(left)
 
@@ -1474,8 +1579,8 @@ class App:
         right_split.pack(fill="both", expand=True)
         tabs_container = ttk.Frame(right_split)
         log_frame = ttk.Frame(right_split)
-        right_split.add(tabs_container, weight=3)
-        right_split.add(log_frame, weight=1)
+        right_split.add(tabs_container, weight=5)
+        right_split.add(log_frame, weight=0)
 
         right_tabs = ttk.Notebook(tabs_container)
         right_tabs.pack(fill="both", expand=True)
@@ -1487,6 +1592,13 @@ class App:
         self.build_plan_panel(plan_frame)
         self.build_verifier_panel(verifier_frame)
         self.build_log_panel(log_frame)
+
+    @staticmethod
+    def _safe_sashpos(paned: ttk.PanedWindow, index: int, pos: int) -> None:
+        try:
+            paned.sashpos(index, pos)
+        except Exception:
+            pass
 
     def refresh_serial_ports(self):
         ports = DirectSerialClient.available_ports()
@@ -1528,6 +1640,9 @@ class App:
         self.g16_var = tk.IntVar(value=0)
         self.b16_var = tk.IntVar(value=0)
         self.w16_var = tk.IntVar(value=0)
+        # W2 is only used by the Phase-8 RGBWW/RGBCCT direct-output opcode.
+        # It is intentionally not folded into W on the host side.
+        self.w2_16_var = getattr(self, "w2_16_var", tk.IntVar(value=0))
         self.bfi_r_var = tk.IntVar(value=0)
         self.bfi_g_var = tk.IntVar(value=0)
         self.bfi_b_var = tk.IntVar(value=0)
@@ -1562,7 +1677,7 @@ class App:
 
         fill16 = ttk.LabelFrame(true16_tab, text="True 16-bit patch values")
         fill16.pack(fill="x", padx=8, pady=6)
-        for txt, var in [("R16", self.r16_var), ("G16", self.g16_var), ("B16", self.b16_var), ("W16", self.w16_var)]:
+        for txt, var in [("R16", self.r16_var), ("G16", self.g16_var), ("B16", self.b16_var), ("W16", self.w16_var), ("W2 16", self.w2_16_var)]:
             row = ttk.Frame(fill16)
             row.pack(fill="x", padx=4, pady=2)
             ttk.Label(row, text=txt, width=8).pack(side="left")
@@ -1584,6 +1699,8 @@ class App:
         btns = ttk.Frame(box)
         btns.pack(fill="x", padx=8, pady=8)
         ttk.Button(btns, text="Send State", command=self.send_fill).pack(side="left", padx=4)
+        ttk.Button(btns, text="Direct RGBW16", command=self.send_direct_rgbw16).pack(side="left", padx=4)
+        ttk.Button(btns, text="Direct RGBWW16", command=self.send_direct_rgbww16).pack(side="left", padx=4)
         ttk.Button(btns, text="Commit", command=self.commit).pack(side="left", padx=4)
         ttk.Button(btns, text="Clear", command=self.clear).pack(side="left", padx=4)
         ttk.Button(btns, text="Measure Once", command=self.measure_once).pack(side="left", padx=12)
@@ -1614,7 +1731,7 @@ class App:
     def build_log_panel(self, parent):
         box = ttk.LabelFrame(parent, text="Logs")
         box.pack(fill="both", expand=True, pady=6)
-        self.log = tk.Text(box, height=10, wrap="word")
+        self.log = tk.Text(box, height=5, wrap="word")
         self.log.pack(fill="both", expand=True, padx=6, pady=6)
 
     def build_plan_panel(self, parent):
@@ -2038,7 +2155,11 @@ class App:
         if mode == "blend8":
             self.preview_text.set(f"BLEND8 upper=({r},{g},{b},{self.w_var.get()}) lower=({self.lower_r_var.get()},{self.lower_g_var.get()},{self.lower_b_var.get()},{self.lower_w_var.get()}) BFI=({self.bfi_r_var.get()},{self.bfi_g_var.get()},{self.bfi_b_var.get()},{self.bfi_w_var.get()})")
         elif mode == "fill16":
-            self.preview_text.set(f"FILL16 RGBW16=({self.r16_var.get()},{self.g16_var.get()},{self.b16_var.get()},{self.w16_var.get()}) RGBW8=({r},{g},{b},{self.w_var.get()})")
+            self.preview_text.set(
+                f"FILL16 RGBW16=({self.r16_var.get()},{self.g16_var.get()},"
+                f"{self.b16_var.get()},{self.w16_var.get()}) W2={self.w2_16_var.get()} "
+                f"RGBW8=({r},{g},{b},{self.w_var.get()})"
+            )
         else:
             self.preview_text.set(f"FILL8 RGBW=({r},{g},{b},{self.w_var.get()}) BFI=({self.bfi_r_var.get()},{self.bfi_g_var.get()},{self.bfi_b_var.get()},{self.bfi_w_var.get()})")
 
@@ -2101,6 +2222,90 @@ class App:
             row.bfi_w & 0xFF,
         ])
 
+    def _build_direct_rgbw16_payload(self, values: list[int] | tuple[int, int, int, int]) -> bytes:
+        payload = bytearray([OP_SET_DIRECT_RGBW16])
+        for value in values:
+            payload.extend(self._pack_u16(value))
+        return bytes(payload)
+
+    def _build_direct_rgbww16_payload(self, values: list[int] | tuple[int, int, int, int, int]) -> bytes:
+        payload = bytearray([OP_SET_DIRECT_RGBWW16])
+        for value in values:
+            payload.extend(self._pack_u16(value))
+        return bytes(payload)
+
+    def _build_output_mode_payload(self) -> bytes:
+        mode_name = self._device_output_mode_var.get()
+        mode_id = OUTPUT_MODE_CHOICES.get(mode_name, OUTPUT_MODE_RGBW)
+        return bytes([OP_SET_OUTPUT_MODE, mode_id & 0xFF])
+
+    def _send_rgbw16_direct_or_fill16(self, values: list[int] | tuple[int, int, int, int], timeout_s: float = 0.8) -> dict[str, object] | None:
+        msg = self._send_cal_request_wait(self._build_direct_rgbw16_payload(values), OP_SET_DIRECT_RGBW16, timeout_s=timeout_s)
+        if isinstance(msg, dict) and int(msg.get("status", 255)) == STATUS_OK:
+            return msg
+        try:
+            status = int(msg.get("status", STATUS_BAD_OPCODE)) if isinstance(msg, dict) else STATUS_BAD_OPCODE
+        except Exception:
+            status = STATUS_BAD_OPCODE
+        if msg is None or status == STATUS_BAD_OPCODE:
+            self.log_queue.put("[protocol] OP_SET_DIRECT_RGBW16 unavailable; falling back to OP_SET_FILL16")
+            payload = bytearray([OP_SET_FILL16])
+            for value in values:
+                payload.extend(self._pack_u16(value))
+            self.device.send_frame(KIND_CAL_REQ, bytes(payload))
+            return None
+        raise RuntimeError(f"direct RGBW16 rejected: {_status_name(status)}")
+
+    def send_output_mode(self) -> None:
+        if not self.device.is_connected():
+            messagebox.showerror("Output mode", "Connect the Teensy device first.")
+            return
+        try:
+            msg = self._send_cal_request_wait(self._build_output_mode_payload(), OP_SET_OUTPUT_MODE, timeout_s=1.0)
+            if msg is None:
+                raise RuntimeError("no response to OP_SET_OUTPUT_MODE")
+            status = int(msg.get("status", 255))
+            if status != STATUS_OK:
+                raise RuntimeError(f"OP_SET_OUTPUT_MODE failed: {_status_name(status)}")
+            self._apply_device_mode_status(msg)
+        except Exception as exc:
+            self.log_queue.put(f"[protocol] output mode failed: {exc}")
+            messagebox.showerror("Output mode failed", str(exc))
+
+    def send_direct_rgbw16(self) -> None:
+        if not self.device.is_connected():
+            messagebox.showerror("Direct RGBW16", "Connect the Teensy device first.")
+            return
+        try:
+            values = [self.r16_var.get(), self.g16_var.get(), self.b16_var.get(), self.w16_var.get()]
+            msg = self._send_cal_request_wait(self._build_direct_rgbw16_payload(values), OP_SET_DIRECT_RGBW16, timeout_s=1.0)
+            if msg is None:
+                raise RuntimeError("no response to OP_SET_DIRECT_RGBW16 / OP_SET_ANALYTICAL_RGBW16")
+            status = int(msg.get("status", 255))
+            if status != STATUS_OK:
+                raise RuntimeError(f"direct RGBW16 failed: {_status_name(status)}")
+            self._apply_device_mode_status(msg)
+        except Exception as exc:
+            self.log_queue.put(f"[protocol] direct RGBW16 failed: {exc}")
+            messagebox.showerror("Direct RGBW16 failed", str(exc))
+
+    def send_direct_rgbww16(self) -> None:
+        if not self.device.is_connected():
+            messagebox.showerror("Direct RGBWW16", "Connect the Teensy device first.")
+            return
+        try:
+            values = [self.r16_var.get(), self.g16_var.get(), self.b16_var.get(), self.w16_var.get(), self.w2_16_var.get()]
+            msg = self._send_cal_request_wait(self._build_direct_rgbww16_payload(values), OP_SET_DIRECT_RGBWW16, timeout_s=1.0)
+            if msg is None:
+                raise RuntimeError("no response to OP_SET_DIRECT_RGBWW16 / OP_SET_ANALYTICAL_RGBWW16")
+            status = int(msg.get("status", 255))
+            if status != STATUS_OK:
+                raise RuntimeError(f"direct RGBWW16 failed: {_status_name(status)}")
+            self._apply_device_mode_status(msg)
+        except Exception as exc:
+            self.log_queue.put(f"[protocol] direct RGBWW16 failed: {exc}")
+            messagebox.showerror("Direct RGBWW16 failed", str(exc))
+
     def _build_manual_row(self) -> MeasurementPlanRow:
         mode = self.manual_mode_var.get()
         r = int(self.r_var.get())
@@ -2160,11 +2365,31 @@ class App:
             self.capture_dir.mkdir(parents=True, exist_ok=True)
             self.log_queue.put(f"[fs] capture dir = {self.capture_dir}")
 
+    def _apply_device_mode_status(self, msg: dict[str, object]) -> None:
+        if "active_output_mode" not in msg:
+            return
+        try:
+            active = int(msg.get("active_output_mode", OUTPUT_MODE_RGBW))
+            mode_name = OUTPUT_MODE_NAMES.get(active, f"mode{active}")
+            supported = int(msg.get("supported_output_mode_bitmask", 0))
+            physical = msg.get("physical_output_channel_count", "?")
+            logical = msg.get("active_logical_channel_count", "?")
+            self._device_output_mode_var.set(mode_name if mode_name in OUTPUT_MODE_CHOICES else self._device_output_mode_var.get())
+            self._device_output_mode_status_var.set(
+                f"device mode: {mode_name}  supported=0x{supported:02X}  phys={physical} logical={logical}"
+            )
+        except Exception:
+            pass
+
     def on_device_packet(self, msg):
         self.current_status = msg
         if msg.get("type") == "cal_response":
             self.cal_response_queue.put(dict(msg))
-        self.status_text.set(f"status: {msg.get('type')}")
+            self._apply_device_mode_status(msg)
+            status = _status_name(msg.get("status")) if msg.get("status") is not None else "?"
+            self.status_text.set(f"status: cal_response op=0x{int(msg.get('op', 0)):02X} {status}")
+        else:
+            self.status_text.set(f"status: {msg.get('type')}")
 
     def _send_cal_request_wait(self, payload: bytes, op: int, timeout_s: float = 1.0) -> dict[str, object] | None:
         while True:
@@ -2435,7 +2660,7 @@ class App:
                 result = self._run_measurement()
                 self.last_measurement = result
                 self.measurement_text.set(self._format_measurement_status(result))
-                out = {"ts": time.time(), "render": {"mode": self.manual_mode_var.get(), "r": self.r_var.get(), "g": self.g_var.get(), "b": self.b_var.get(), "w": self.w_var.get(), "lower_r": self.lower_r_var.get(), "lower_g": self.lower_g_var.get(), "lower_b": self.lower_b_var.get(), "lower_w": self.lower_w_var.get(), "r16": self.r16_var.get(), "g16": self.g16_var.get(), "b16": self.b16_var.get(), "w16": self.w16_var.get(), "bfi_r": self.bfi_r_var.get(), "bfi_g": self.bfi_g_var.get(), "bfi_b": self.bfi_b_var.get(), "bfi_w": self.bfi_w_var.get(), "use_fill16": self.use_fill16_var.get(), "phase_mode": self.phase_mode_var.get(), "phase": self.phase_var.get()}, "measurement": result}
+                out = {"ts": time.time(), "render": {"mode": self.manual_mode_var.get(), "r": self.r_var.get(), "g": self.g_var.get(), "b": self.b_var.get(), "w": self.w_var.get(), "lower_r": self.lower_r_var.get(), "lower_g": self.lower_g_var.get(), "lower_b": self.lower_b_var.get(), "lower_w": self.lower_w_var.get(), "r16": self.r16_var.get(), "g16": self.g16_var.get(), "b16": self.b16_var.get(), "w16": self.w16_var.get(), "w2_16": self.w2_16_var.get(), "bfi_r": self.bfi_r_var.get(), "bfi_g": self.bfi_g_var.get(), "bfi_b": self.bfi_b_var.get(), "bfi_w": self.bfi_w_var.get(), "use_fill16": self.use_fill16_var.get(), "phase_mode": self.phase_mode_var.get(), "phase": self.phase_var.get()}, "measurement": result}
                 path = self.capture_dir / f"single_measure_{int(time.time())}.json"
                 path.write_text(json.dumps(out, indent=2), encoding="utf-8")
                 self.log_queue.put(f"[measure] wrote {path}")
@@ -2679,8 +2904,12 @@ class App:
         ttk.Entry(ref_row, textvariable=self._verifier_ref_white_y_var, width=8).pack(side="left", padx=2)
         ttk.Button(ref_row, text="Apply preset", command=self._verifier_update_reference_white_fields).pack(side="left", padx=4)
         ttk.Checkbutton(ref_row, text="Auto-measure RGBW basis if summary missing", variable=self._verifier_auto_measure_basis_var).pack(side="left", padx=(12, 2))
-        ttk.Button(ref_row, text="Fetch Teensy DiodeProfile", command=self.fetch_teensy_diode_profile_async).pack(side="left", padx=4)
-        ttk.Button(ref_row, text="Measure diode basis now", command=self.measure_verifier_basis_async).pack(side="left", padx=4)
+
+        basis_row = ttk.Frame(box)
+        basis_row.pack(fill="x", pady=2)
+        ttk.Button(basis_row, text="Fetch Teensy DiodeProfile", command=self.fetch_teensy_diode_profile_async).pack(side="left", padx=4)
+        ttk.Button(basis_row, text="Send DiodeProfile to Teensy", command=self.send_teensy_diode_profile_async).pack(side="left", padx=4)
+        ttk.Button(basis_row, text="Measure diode basis now", command=self.measure_verifier_basis_async).pack(side="left", padx=4)
 
         # ── Options / actions ───────────────────────────────────────────────
         opt_row = ttk.Frame(box)
@@ -2725,21 +2954,24 @@ class App:
             state="readonly", width=20,
         )
         dual_edge_cb.pack(side="left", padx=2)
-        ttk.Label(opt_row, text="Target gamut:").pack(side="left", padx=(12, 2))
+
+        opt_row2 = ttk.Frame(box)
+        opt_row2.pack(fill="x", pady=(0, 2))
+        ttk.Label(opt_row2, text="Target gamut:").pack(side="left", padx=(4, 2))
         gamut_cb = ttk.Combobox(
-            opt_row, textvariable=self._verifier_gamut_var,
+            opt_row2, textvariable=self._verifier_gamut_var,
             values=_VERIFIER_GAMUT_CHOICES,
             state="readonly", width=14,
         )
         gamut_cb.pack(side="left", padx=2)
-        ttk.Label(opt_row, text="Transfer:").pack(side="left", padx=(12, 2))
+        ttk.Label(opt_row2, text="Transfer:").pack(side="left", padx=(12, 2))
         transfer_cb = ttk.Combobox(
-            opt_row, textvariable=self._verifier_transfer_var,
+            opt_row2, textvariable=self._verifier_transfer_var,
             values=_VERIFIER_TRANSFER_CHOICES,
             state="readonly", width=7,
         )
         transfer_cb.pack(side="left", padx=2)
-        ttk.Checkbutton(opt_row, text="Project OOH xy", variable=self._verifier_project_hull_var).pack(side="left", padx=(10, 2))
+        ttk.Checkbutton(opt_row2, text="Project OOH xy", variable=self._verifier_project_hull_var).pack(side="left", padx=(10, 2))
         def _update_patch_count(*_):
             patches = _generate_verifier_patches(self._verifier_preset_var.get())
             self._verifier_patch_count_var.set(f"{len(patches)} patches")
@@ -2966,10 +3198,7 @@ class App:
     def _render_verifier_basis_channel(self, ch: str) -> None:
         values = {"R": 0, "G": 0, "B": 0, "W": 0}
         values[ch] = 65535
-        payload = bytearray([OP_SET_FILL16])
-        for c in "RGBW":
-            payload.extend(self._pack_u16(values[c]))
-        self.device.send_frame(KIND_CAL_REQ, bytes(payload))
+        self._send_rgbw16_direct_or_fill16([values[c] for c in "RGBW"], timeout_s=0.8)
         time.sleep(float(self.settle_delay_var.get()))
         self.device.send_frame(KIND_CAL_REQ, bytes([OP_COMMIT]))
         time.sleep(float(self.settle_delay_var.get()))
@@ -3060,6 +3289,139 @@ class App:
             + " ".join(f"{ch}=({clean_xy[ch][0]:.5f},{clean_xy[ch][1]:.5f}) relY={max_y[ch]:.6f}" for ch in "RGBW")
         )
         return basis
+
+    def _install_diode_profile_summary(self, profile: dict[str, object], source: str) -> dict[str, np.ndarray]:
+        primaries_xy = profile.get("primaries_xy")
+        relative_y = profile.get("relative_y")
+        if not isinstance(primaries_xy, dict) or not isinstance(relative_y, dict):
+            raise RuntimeError("malformed DiodeProfile payload")
+
+        basis: dict[str, np.ndarray] = {}
+        clean_xy: dict[str, list[float]] = {}
+        max_y: dict[str, float] = {}
+        for ch in "RGBW":
+            xy = primaries_xy[ch]
+            x = float(xy[0])
+            y = float(xy[1])
+            rel_y = float(relative_y[ch])
+            if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(rel_y) and x > 0.0 and y > 0.0 and x + y < 1.0 and rel_y > 0.0):
+                raise RuntimeError(f"invalid DiodeProfile basis for {ch}: xy=({x},{y}) Y={rel_y}")
+            clean_xy[ch] = [x, y]
+            max_y[ch] = rel_y
+            basis[ch] = _verifier_xyY_to_XYZ((x, y), rel_y)
+
+        ref_x, ref_y = self._verifier_ref_white()
+        self.verifier_summary = {
+            "basis_xyz_per_q16": {
+                "r16": basis["R"].tolist(),
+                "g16": basis["G"].tolist(),
+                "b16": basis["B"].tolist(),
+                "w16": basis["W"].tolist(),
+            },
+            "basis_sanity": {
+                "reference_white_xy": [float(ref_x), float(ref_y)],
+                "basis_source": source,
+                "basis_units": "relative_Y",
+            },
+            "settings": {
+                "target_white_balance_mode": "reference-white",
+                "input_transfer": self._verifier_transfer_var.get(),
+                "gamut": self._verifier_gamut_var.get(),
+            },
+            "primaries_xy": clean_xy,
+            "max_Y": max_y,
+            "reference_white_xy": [float(ref_x), float(ref_y)],
+            "generated_by": f"host_calibration_gui_{source}",
+            "generated_at": time.time(),
+        }
+        basis_label = (
+            f"{source} RGBW basis  "
+            f"R=({clean_xy['R'][0]:.4f},{clean_xy['R'][1]:.4f}) "
+            f"G=({clean_xy['G'][0]:.4f},{clean_xy['G'][1]:.4f}) "
+            f"B=({clean_xy['B'][0]:.4f},{clean_xy['B'][1]:.4f}) "
+            f"W=({clean_xy['W'][0]:.4f},{clean_xy['W'][1]:.4f})"
+        )
+        self.root.after(0, lambda label=basis_label: self._verifier_summary_label.set(label))
+        self.log_queue.put(
+            f"[verifier] {source} basis loaded: "
+            + " ".join(f"{ch}=({clean_xy[ch][0]:.5f},{clean_xy[ch][1]:.5f}) relY={max_y[ch]:.6f}" for ch in "RGBW")
+        )
+        return basis
+
+    def _extract_diode_profile_from_summary(self) -> dict[str, object]:
+        basis = self._verifier_model_projection_basis_xyz()
+        if basis is None:
+            raise RuntimeError("no RGBW basis available; load a summary, fetch a profile, or measure the diode basis first")
+        primaries_xy: dict[str, list[float]] = {}
+        relative_y: dict[str, float] = {}
+        for ch in "RGBW":
+            xy = _verifier_xyz_to_xy_tuple(basis[ch])
+            if xy is None:
+                raise RuntimeError(f"invalid basis xy for {ch}")
+            rel_y = float(basis[ch][1])
+            if not (math.isfinite(xy[0]) and math.isfinite(xy[1]) and xy[0] > 0.0 and xy[1] > 0.0 and xy[0] + xy[1] < 1.0 and math.isfinite(rel_y) and rel_y > 0.0):
+                raise RuntimeError(f"basis cannot be encoded as DiodeProfile for {ch}")
+            primaries_xy[ch] = [float(xy[0]), float(xy[1])]
+            relative_y[ch] = rel_y
+        return {
+            "version": 1,
+            "format": "u32be_q1e6",
+            "primaries_xy": primaries_xy,
+            "relative_y": relative_y,
+            "channel_order": list("RGBW"),
+            "source": "host_summary",
+        }
+
+    def _encode_set_diode_profile_payload(self, profile: dict[str, object]) -> bytes:
+        primaries_xy = profile.get("primaries_xy")
+        relative_y = profile.get("relative_y")
+        if not isinstance(primaries_xy, dict) or not isinstance(relative_y, dict):
+            raise RuntimeError("profile lacks primaries_xy/relative_y")
+        payload = bytearray([OP_SET_DIODE_PROFILE])
+        payload.extend(b"DPRF")
+        payload.append(1)
+        payload.append(1)
+        for ch in "RGBW":
+            xy = primaries_xy[ch]
+            x = float(xy[0])
+            y = float(xy[1])
+            rel_y = float(relative_y[ch])
+            if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(rel_y) and x > 0.0 and y > 0.0 and x + y < 1.0 and rel_y > 0.0):
+                raise RuntimeError(f"invalid DiodeProfile value for {ch}: xy=({x},{y}) Y={rel_y}")
+            payload.extend(_pack_u32_be_q1e6(x))
+            payload.extend(_pack_u32_be_q1e6(y))
+            payload.extend(_pack_u32_be_q1e6(rel_y))
+        return bytes(payload)
+
+    def send_teensy_diode_profile_async(self) -> None:
+        if self.verifier_running:
+            messagebox.showinfo("LUT Verifier", "Stop the active verification before sending a DiodeProfile.")
+            return
+        if not self.device.is_connected():
+            messagebox.showerror("LUT Verifier", "Connect the Teensy device first.")
+            return
+
+        def worker() -> None:
+            try:
+                self.root.after(0, lambda: self._verifier_status_var.set("sending DiodeProfile to Teensy"))
+                profile = self._extract_diode_profile_from_summary()
+                payload = self._encode_set_diode_profile_payload(profile)
+                msg = self._send_cal_request_wait(payload, OP_SET_DIODE_PROFILE, timeout_s=2.0)
+                if msg is None:
+                    raise RuntimeError("no response to OP_SET_DIODE_PROFILE")
+                status = int(msg.get("status", 255))
+                if status != STATUS_OK:
+                    raise RuntimeError(f"Teensy returned {_status_name(status)} for OP_SET_DIODE_PROFILE")
+                response_profile = msg.get("diode_profile")
+                if isinstance(response_profile, dict):
+                    self._install_diode_profile_summary(response_profile, "teensy_diode_profile_set_response")
+                self.root.after(0, lambda: self._verifier_status_var.set("DiodeProfile sent"))
+            except Exception as exc:
+                self.log_queue.put(f"[verifier] DiodeProfile send failed: {exc}")
+                self.root.after(0, lambda e=str(exc): messagebox.showerror("Send DiodeProfile failed", e))
+                self.root.after(0, lambda: self._verifier_status_var.set("DiodeProfile send failed"))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def measure_verifier_basis_async(self) -> None:
         if self.verifier_running:
@@ -3376,7 +3738,7 @@ class App:
                         cal_msg = self._send_cal_request_wait(bytes(payload), OP_SET_ANALYTICAL_RGB16, timeout_s=1.5)
                         if not isinstance(cal_msg, dict) or cal_msg.get("status") != 0:
                             status = cal_msg.get("status") if isinstance(cal_msg, dict) else None
-                            raise RuntimeError(f"analytical MCU solve failed status={status}")
+                            raise RuntimeError(f"analytical MCU solve failed status={_status_name(status)}")
                         solved = cal_msg.get("solved_rgbw16") if isinstance(cal_msg, dict) else None
                         if isinstance(solved, list) and len(solved) == 4:
                             lr, lg, lb, lw = [int(v) for v in solved]
@@ -3411,10 +3773,7 @@ class App:
 
                     # --- Send RGBW fill16, unless the analytical opcode already rendered it ---
                     if using_lut_row:
-                        payload = bytearray([OP_SET_FILL16])
-                        for v in [lr, lg, lb, lw]:
-                            payload.extend(self._pack_u16(v))
-                        self.device.send_frame(KIND_CAL_REQ, bytes(payload))
+                        self._send_rgbw16_direct_or_fill16([lr, lg, lb, lw], timeout_s=0.8)
                         time.sleep(self.settle_delay_var.get())
                     else:
                         time.sleep(self.settle_delay_var.get())
@@ -3461,6 +3820,15 @@ class App:
                         "r16": r16, "g16": g16, "b16": b16,
                         "lut_r16": lr, "lut_g16": lg, "lut_b16": lb, "lut_w16": lw,
                         "output_source": output_source,
+                        "active_output_mode": cal_msg.get("active_output_mode") if isinstance(cal_msg, dict) else None,
+                        "supported_output_mode_bitmask": cal_msg.get("supported_output_mode_bitmask") if isinstance(cal_msg, dict) else None,
+                        "physical_output_channel_count": cal_msg.get("physical_output_channel_count") if isinstance(cal_msg, dict) else None,
+                        "active_logical_channel_count": cal_msg.get("active_logical_channel_count") if isinstance(cal_msg, dict) else None,
+                        "last_input_w16": cal_msg.get("last_input_w16") if isinstance(cal_msg, dict) else None,
+                        "last_input_w2_16": cal_msg.get("last_input_w2_16") if isinstance(cal_msg, dict) else None,
+                        "last_solved_w2_16": cal_msg.get("last_solved_w2_16") if isinstance(cal_msg, dict) else None,
+                        "fold_stub_flag": cal_msg.get("fold_stub_flag") if isinstance(cal_msg, dict) else None,
+                        "response_extension_version": cal_msg.get("response_extension_version") if isinstance(cal_msg, dict) else None,
                         "analytical_model": analytical_model if not using_lut_row else "",
                         "analytical_dual_edge_policy": analytical_dual_edge_policy if not using_lut_row else "",
                         "analytical_solve_path": solve_path if not using_lut_row else "",
@@ -3598,7 +3966,11 @@ class App:
         fieldnames = [
             "patch", "r16", "g16", "b16",
             "lut_r16", "lut_g16", "lut_b16", "lut_w16", "w_pct",
-            "output_source", "analytical_model",
+            "output_source", "active_output_mode", "supported_output_mode_bitmask",
+            "physical_output_channel_count", "active_logical_channel_count",
+            "last_input_w16", "last_input_w2_16", "last_solved_w2_16",
+            "fold_stub_flag", "response_extension_version",
+            "analytical_model",
             "analytical_dual_edge_policy",
             "analytical_solve_path",
             "analytical_strict_ok", "analytical_strict_rgbw16", "analytical_lp_rgbw16",

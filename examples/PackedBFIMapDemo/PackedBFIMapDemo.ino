@@ -2,9 +2,8 @@
 // Demonstrates the packed BFI map API — stores per-pixel BFI levels in a
 // nybble-pair buffer (2 bytes/pixel) instead of separate per-channel arrays.
 //
-// This sketch exercises both RGB and RGBW packed paths:
-//   - RGB:  commitPixelRGB_Packed  + renderSubpixelBFI_RGB_Packed
-//   - RGBW: commitPixelRGBW_Packed + renderSubpixelBFI_RGBW_Packed
+// This sketch exercises both RGB and RGBW packed paths through the
+// consolidated commit/render APIs configured for packed BFI storage.
 //
 // The inline helpers packBfi4/unpackBfi4, readPackedBfiChannel, and
 // writePackedBfiChannel are also demonstrated for post-commit clamping.
@@ -22,6 +21,16 @@ using namespace TemporalBFI;
 static constexpr uint16_t LED_COUNT  = 16;
 static constexpr uint8_t  CYCLE_LEN  = SOLVER_FIXED_BFI_LEVELS;  // 5
 static constexpr uint16_t LUT_SIZE   = TemporalBFIRuntime::SOLVER_LUT_SIZE;
+
+static constexpr RenderOptions RGB_PACKED_OPTIONS = {
+    LedColorOrder::GRB,
+    BfiMapStorageMode::Packed,
+};
+
+static constexpr RenderOptions RGBW_PACKED_OPTIONS = {
+    LedColorOrder::GRBW,
+    BfiMapStorageMode::Packed,
+};
 
 // Solver LUTs.
 static uint8_t solverValueLUT[4 * LUT_SIZE];
@@ -66,19 +75,28 @@ static void fillGradient() {
 
 // Solve and commit into the RGB packed buffers.
 static void solveRGB() {
+    BfiMapWriteView bfiMaps;
+    bfiMaps.packedBfiMap = packedBfiRGB;
+
     for (uint16_t i = 0; i < LED_COUNT; ++i) {
         EncodedState stG = solver.solve(srcG[i], 0);
         EncodedState stR = solver.solve(srcR[i], 1);
         EncodedState stB = solver.solve(srcB[i], 2);
 
-        SolverRuntime::commitPixelRGB_Packed(
-            upperRGB, floorRGB, packedBfiRGB,
-            i, stG, stR, stB);
+        EncodedState states[3] = {stG, stR, stB};
+
+        SolverRuntime::commitPixel(
+            upperRGB, floorRGB, bfiMaps,
+            i, states, 3,
+            RGB_PACKED_OPTIONS);
     }
 }
 
 // Solve and commit into the RGBW packed buffers (white = min-of-RGB).
 static void solveRGBW() {
+    BfiMapWriteView bfiMaps;
+    bfiMaps.packedBfiMap = packedBfiRGBW;
+
     for (uint16_t i = 0; i < LED_COUNT; ++i) {
         EncodedState stG = solver.solve(srcG[i], 0);
         EncodedState stR = solver.solve(srcR[i], 1);
@@ -86,9 +104,12 @@ static void solveRGBW() {
         uint16_t wQ16 = min3U16(srcR[i], srcG[i], srcB[i]);
         EncodedState stW = solver.solve(wQ16, 3);
 
-        SolverRuntime::commitPixelRGBW_Packed(
-            upperRGBW, floorRGBW, packedBfiRGBW,
-            i, stG, stR, stB, stW);
+        EncodedState states[4] = {stG, stR, stB, stW};
+
+        SolverRuntime::commitPixel(
+            upperRGBW, floorRGBW, bfiMaps,
+            i, states, 4,
+            RGBW_PACKED_OPTIONS);
     }
 }
 
@@ -152,7 +173,9 @@ void setup() {
     while (!Serial && millis() < 3000) {}
 
     solver.attachLUTs(solverValueLUT, solverBFILUT, solverFloorLUT, nullptr, LUT_SIZE);
-    solver.precompute(TemporalTrue16BFIPolicySolver::encodeStateFrom16);
+    solver.setLedColorOrder(LedColorOrder::GRBW);
+    solver.setSolverLUTMode(SolverLUTMode::PerChannel);
+    solver.precompute(TemporalTrue16BFIPolicySolver::encodeStateFrom16, 4);
 
     fillGradient();
 
@@ -174,10 +197,13 @@ void setup() {
     printPixelBfi("RGB BFI map", packedBfiRGB, LED_COUNT, 3);
 
     Serial.println("\nRGB render (first 4 pixels, all phases):");
+    BfiMapView rgbPackedMaps;
+    rgbPackedMaps.packedBfiMap = packedBfiRGB;
     for (uint8_t ph = 0; ph < CYCLE_LEN; ++ph) {
-        SolverRuntime::renderSubpixelBFI_RGB_Packed(
-            upperRGB, floorRGB, packedBfiRGB,
-            dispRGB, LED_COUNT, ph);
+        SolverRuntime::renderLoopStatic(
+            upperRGB, floorRGB, rgbPackedMaps,
+            dispRGB, LED_COUNT, ph,
+            RGB_PACKED_OPTIONS);
         char tag[16];
         snprintf(tag, sizeof(tag), "phase %u", ph);
         printRenderRow(tag, dispRGB, LED_COUNT, 3);
@@ -196,10 +222,13 @@ void setup() {
     printPixelBfi("RGBW BFI map", packedBfiRGBW, LED_COUNT, 4);
 
     Serial.println("\nRGBW render (first 4 pixels, all phases):");
+    BfiMapView rgbwPackedMaps;
+    rgbwPackedMaps.packedBfiMap = packedBfiRGBW;
     for (uint8_t ph = 0; ph < CYCLE_LEN; ++ph) {
-        SolverRuntime::renderSubpixelBFI_RGBW_Packed(
-            upperRGBW, floorRGBW, packedBfiRGBW,
-            dispRGBW, LED_COUNT, ph);
+        SolverRuntime::renderLoopStatic(
+            upperRGBW, floorRGBW, rgbwPackedMaps,
+            dispRGBW, LED_COUNT, ph,
+            RGBW_PACKED_OPTIONS);
         char tag[16];
         snprintf(tag, sizeof(tag), "phase %u", ph);
         printRenderRow(tag, dispRGBW, LED_COUNT, 4);

@@ -8,6 +8,8 @@
 //
 // Pipeline order:
 //   Input → Transfer Curve → 3D Cube LUT → Solver
+// Uses consolidated commit/render APIs and explicit solver configuration
+// (color order + solver LUT mode) so migration state is self-documented.
 //
 // The cube LUT already contains pre-calibrated RGBW (or RGB) values
 // and should be the last color-modifying stage before the solver encodes
@@ -47,6 +49,12 @@ using namespace TemporalBFI;
 static constexpr uint16_t LED_COUNT = 4;
 static constexpr uint8_t  CYCLE_LEN = 5;
 static constexpr uint16_t LUT_SIZE  = TemporalBFIRuntime::SOLVER_LUT_SIZE;
+static constexpr uint8_t  CHANNELS  = 4;
+
+static constexpr RenderOptions RENDER_OPTIONS = {
+    LedColorOrder::GRBW,
+    BfiMapStorageMode::Separate,
+};
 
 // SD card filename (exported by rgbw_lut_gui.py → "Export Binary Cube").
 static const char* SD_CUBE_FILENAME = "cube.bin";
@@ -156,9 +164,9 @@ static uint8_t solverBFILUT  [4 * LUT_SIZE];
 static uint8_t solverFloorLUT[4 * LUT_SIZE];
 
 // Pixel buffers
-static uint8_t upperFrame[LED_COUNT * 4] = {0};
-static uint8_t floorFrame[LED_COUNT * 4] = {0};
-static uint8_t displayBuf[LED_COUNT * 4] = {0};
+static uint8_t upperFrame[LED_COUNT * CHANNELS] = {0};
+static uint8_t floorFrame[LED_COUNT * CHANNELS] = {0};
+static uint8_t displayBuf[LED_COUNT * CHANNELS] = {0};
 static uint8_t bfiG[LED_COUNT] = {0};
 static uint8_t bfiR[LED_COUNT] = {0};
 static uint8_t bfiB[LED_COUNT] = {0};
@@ -308,11 +316,21 @@ static void processTestPixel(uint16_t rQ16, uint16_t gQ16, uint16_t bQ16) {
     EncodedState stB = solver.solve(targets.bQ16, 2);
     EncodedState stW = solver.solve(targets.wQ16, 3);
 
+    EncodedState states[4] = {stG, stR, stB, stW};
+    BfiMapWriteView bfiMaps;
+    bfiMaps.bfiMapG = bfiG;
+    bfiMaps.bfiMapR = bfiR;
+    bfiMaps.bfiMapB = bfiB;
+    bfiMaps.bfiMapW1 = bfiW;
+
     for (uint16_t i = 0; i < LED_COUNT; ++i) {
-        SolverRuntime::commitPixelRGBW(
+        SolverRuntime::commitPixel(
             upperFrame, floorFrame,
-            bfiG, bfiR, bfiB, bfiW,
-            i, stG, stR, stB, stW);
+            bfiMaps,
+            i,
+            states,
+            CHANNELS,
+            RENDER_OPTIONS);
     }
 
     Serial.print("Solver: G(v="); Serial.print(stG.value);
@@ -360,7 +378,9 @@ void setup() {
 
     // Initialise solver with precomputed BFI LUTs.
     solver.attachLUTs(solverValueLUT, solverBFILUT, solverFloorLUT, nullptr, LUT_SIZE);
-    solver.precompute(TemporalTrue16BFIPolicySolver::encodeStateFrom16);
+    solver.setLedColorOrder(RENDER_OPTIONS.colorOrder);
+    solver.setSolverLUTMode(SolverLUTMode::PerChannel);
+    solver.precompute(TemporalTrue16BFIPolicySolver::encodeStateFrom16, CHANNELS);
 
     // --- Attempt to load a cube, falling through sources ---
     bool cubeLoaded = false;
@@ -409,10 +429,17 @@ static constexpr uint32_t SERIAL_INTERVAL_MS = 200;
 static uint32_t lastSerialMs = 0;
 
 void loop() {
-    SolverRuntime::renderSubpixelBFI_RGBW(
+    BfiMapView bfiMaps;
+    bfiMaps.bfiMapG = bfiG;
+    bfiMaps.bfiMapR = bfiR;
+    bfiMaps.bfiMapB = bfiB;
+    bfiMaps.bfiMapW1 = bfiW;
+
+    SolverRuntime::renderLoopStatic(
         upperFrame, floorFrame,
-        bfiG, bfiR, bfiB, bfiW,
-        displayBuf, LED_COUNT, phase);
+        bfiMaps,
+        displayBuf, LED_COUNT, phase,
+        RENDER_OPTIONS);
 
     // --- LED .show() would go here in a real sketch ---
 

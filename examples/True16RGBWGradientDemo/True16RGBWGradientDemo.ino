@@ -11,24 +11,71 @@ using namespace TemporalBFI;
 static constexpr uint16_t LED_COUNT = 16;
 static constexpr uint8_t  CYCLE_LEN = 5;
 static constexpr uint16_t LUT_SIZE  = TemporalBFIRuntime::SOLVER_LUT_SIZE;
+enum class DemoOutputLayout : uint8_t {
+    RGB = 3,
+    RGBW = 4,
+    RGBWW = 5,
+};
 
-static uint8_t  solverValueLUT[4 * LUT_SIZE];
-static uint8_t  solverBFILUT  [4 * LUT_SIZE];
-static uint8_t  solverFloorLUT[4 * LUT_SIZE];
+// Switch this to RGB, RGBW, or RGBWW to compare output families.
+static constexpr DemoOutputLayout DEMO_LAYOUT = DemoOutputLayout::RGBWW;
 
-static uint8_t upperFrame[LED_COUNT * 4] = {0};
-static uint8_t floorFrame[LED_COUNT * 4] = {0};
-static uint8_t displayBuf[LED_COUNT * 4] = {0};
+static constexpr uint8_t channelCountForDemoLayout(DemoOutputLayout layout) {
+    switch (layout) {
+        case DemoOutputLayout::RGB: return 3;
+        case DemoOutputLayout::RGBW: return 4;
+        default: return 5;
+    }
+}
+
+static constexpr LedColorOrder colorOrderForDemoLayout(DemoOutputLayout layout) {
+    switch (layout) {
+        case DemoOutputLayout::RGB: return LedColorOrder::GRB;
+        case DemoOutputLayout::RGBW: return LedColorOrder::GRBW;
+        default: return LedColorOrder::GRBW1W2;
+    }
+}
+
+static constexpr const char* demoLayoutName(DemoOutputLayout layout) {
+    switch (layout) {
+        case DemoOutputLayout::RGB: return "RGB";
+        case DemoOutputLayout::RGBW: return "RGBW";
+        default: return "RGBWW";
+    }
+}
+
+static constexpr uint8_t DEMO_CHANNELS = channelCountForDemoLayout(DEMO_LAYOUT);
+
+static constexpr RenderOptions RENDER_OPTIONS = {
+    colorOrderForDemoLayout(DEMO_LAYOUT),
+    BfiMapStorageMode::Separate,
+};
+
+static uint8_t  solverValueLUT[5 * LUT_SIZE];
+static uint8_t  solverBFILUT  [5 * LUT_SIZE];
+static uint8_t  solverFloorLUT[5 * LUT_SIZE];
+
+static uint8_t upperFrame[LED_COUNT * DEMO_CHANNELS] = {0};
+static uint8_t floorFrame[LED_COUNT * DEMO_CHANNELS] = {0};
+static uint8_t displayBuf[LED_COUNT * DEMO_CHANNELS] = {0};
 static uint8_t bfiG[LED_COUNT] = {0};
 static uint8_t bfiR[LED_COUNT] = {0};
 static uint8_t bfiB[LED_COUNT] = {0};
 static uint8_t bfiW[LED_COUNT] = {0};
+static uint8_t bfiW2[LED_COUNT] = {0};
 
 static SolverRuntime solver;
 static uint8_t  phase  = 0;
 static uint16_t offset = 0;
 
 static void updateGradient() {
+    BfiMapWriteView bfiMaps;
+    bfiMaps.bfiMapG = bfiG;
+    bfiMaps.bfiMapR = bfiR;
+    bfiMaps.bfiMapB = bfiB;
+    bfiMaps.bfiMapW1 = bfiW;
+    bfiMaps.bfiMapW2 = bfiW2;
+
     for (uint16_t i = 0; i < LED_COUNT; ++i) {
         // Each LED gets a unique position in a smooth colour sweep.
         uint32_t pos = ((uint32_t)(i + offset) * 65535u) / LED_COUNT;
@@ -36,17 +83,35 @@ static void updateGradient() {
         uint16_t gQ16 = (uint16_t)((65535u - pos) & 0xFFFFu);
         uint16_t bQ16 = (uint16_t)((pos >> 1) & 0xFFFFu);
 
-        RgbwTargets t = solver.extractRgbw(rQ16, gQ16, bQ16);
+        EncodedState states[5] = {};
+        uint8_t stateCount = DEMO_CHANNELS;
 
-        EncodedState stG = solver.solve(t.gQ16, 0);
-        EncodedState stR = solver.solve(t.rQ16, 1);
-        EncodedState stB = solver.solve(t.bQ16, 2);
-        EncodedState stW = solver.solve(t.wQ16, 3);
+        if (DEMO_LAYOUT == DemoOutputLayout::RGB) {
+            states[0] = solver.solve(gQ16, 0);
+            states[1] = solver.solve(rQ16, 1);
+            states[2] = solver.solve(bQ16, 2);
+        } else if (DEMO_LAYOUT == DemoOutputLayout::RGBW) {
+            const RgbwTargets t = solver.extractRgbw(rQ16, gQ16, bQ16);
+            states[0] = solver.solve(t.gQ16, 0);
+            states[1] = solver.solve(t.rQ16, 1);
+            states[2] = solver.solve(t.bQ16, 2);
+            states[3] = solver.solve(t.wQ16, 3);
+        } else {
+            const RgbwwTargets t = solver.extractRgbwwEmulated(rQ16, gQ16, bQ16);
+            states[0] = solver.solve(t.gQ16, 0);
+            states[1] = solver.solve(t.rQ16, 1);
+            states[2] = solver.solve(t.bQ16, 2);
+            states[3] = solver.solveWhiteEmulated(t.w1Q16);
+            states[4] = solver.solveWhiteEmulated(t.w2Q16);
+        }
 
-        SolverRuntime::commitPixelRGBW(
+        SolverRuntime::commitPixel(
             upperFrame, floorFrame,
-            bfiG, bfiR, bfiB, bfiW,
-            i, stG, stR, stB, stW);
+            bfiMaps,
+            i,
+            states,
+            stateCount,
+            RENDER_OPTIONS);
     }
 }
 
@@ -55,9 +120,13 @@ void setup() {
     while (!Serial && millis() < 3000) {}
 
     solver.attachLUTs(solverValueLUT, solverBFILUT, solverFloorLUT, nullptr, LUT_SIZE);
-    solver.precompute(TemporalTrue16BFIPolicySolver::encodeStateFrom16);
+    solver.setLedColorOrder(RENDER_OPTIONS.colorOrder);
+    solver.setSolverLUTMode(SolverLUTMode::PerChannel);
+    solver.precompute(TemporalTrue16BFIPolicySolver::encodeStateFrom16, DEMO_CHANNELS);
 
     Serial.println("True16RGBWGradientDemo");
+    Serial.print("Layout: ");   Serial.println(demoLayoutName(DEMO_LAYOUT));
+    Serial.print("Channels: "); Serial.println(DEMO_CHANNELS);
     Serial.print("LEDs: ");     Serial.println(LED_COUNT);
     Serial.print("LUT size: "); Serial.println(LUT_SIZE);
 }
@@ -76,10 +145,18 @@ void loop() {
         updateGradient();
     }
 
-    SolverRuntime::renderSubpixelBFI_RGBW(
+    BfiMapView bfiMaps;
+    bfiMaps.bfiMapG = bfiG;
+    bfiMaps.bfiMapR = bfiR;
+    bfiMaps.bfiMapB = bfiB;
+    bfiMaps.bfiMapW1 = bfiW;
+    bfiMaps.bfiMapW2 = bfiW2;
+
+    SolverRuntime::renderLoopStatic(
         upperFrame, floorFrame,
-        bfiG, bfiR, bfiB, bfiW,
-        displayBuf, LED_COUNT, phase);
+        bfiMaps,
+        displayBuf, LED_COUNT, phase,
+        RENDER_OPTIONS);
 
     // --- LED .show() would go here in a real sketch ---
 
@@ -89,12 +166,12 @@ void loop() {
         Serial.print("Ph");
         Serial.print(phase);
         for (uint16_t i = 0; i < 4 && i < LED_COUNT; ++i) {
-            const uint32_t off = (uint32_t)i * 4u;
+            const uint32_t off = (uint32_t)i * DEMO_CHANNELS;
             Serial.print(" [");
-            Serial.print(displayBuf[off]);     Serial.print(",");
-            Serial.print(displayBuf[off + 1]); Serial.print(",");
-            Serial.print(displayBuf[off + 2]); Serial.print(",");
-            Serial.print(displayBuf[off + 3]);
+            for (uint8_t ch = 0; ch < DEMO_CHANNELS; ++ch) {
+                if (ch) Serial.print(",");
+                Serial.print(displayBuf[off + ch]);
+            }
             Serial.print("]");
         }
         Serial.println();

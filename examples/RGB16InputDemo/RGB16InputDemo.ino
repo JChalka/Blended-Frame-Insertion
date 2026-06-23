@@ -1,5 +1,7 @@
 // RGB16InputDemo.ino
 // 16-bit RGB input → precomputed solver → RGBW extraction → BFI render.
+// Uses consolidated commit/render APIs with explicit color-order and
+// solver-LUT mode settings.
 
 #include <Arduino.h>
 #include <TemporalBFI.h>
@@ -10,16 +12,22 @@ using namespace TemporalBFI;
 static constexpr uint16_t LED_COUNT = 4;
 static constexpr uint8_t  CYCLE_LEN = 5;
 static constexpr uint16_t LUT_SIZE  = TemporalBFIRuntime::SOLVER_LUT_SIZE;
+static constexpr uint8_t  CHANNELS  = 4;
+
+static constexpr RenderOptions RENDER_OPTIONS = {
+    LedColorOrder::GRBW,
+    BfiMapStorageMode::Separate,
+};
 
 // Solver LUT storage.
-static uint8_t  solverValueLUT[4 * LUT_SIZE];
-static uint8_t  solverBFILUT  [4 * LUT_SIZE];
-static uint8_t  solverFloorLUT[4 * LUT_SIZE];
+static uint8_t  solverValueLUT[CHANNELS * LUT_SIZE];
+static uint8_t  solverBFILUT  [CHANNELS * LUT_SIZE];
+static uint8_t  solverFloorLUT[CHANNELS * LUT_SIZE];
 
 // Pixel buffers.
-static uint8_t upperFrame[LED_COUNT * 4] = {0};
-static uint8_t floorFrame[LED_COUNT * 4] = {0};
-static uint8_t displayBuf[LED_COUNT * 4] = {0};
+static uint8_t upperFrame[LED_COUNT * CHANNELS] = {0};
+static uint8_t floorFrame[LED_COUNT * CHANNELS] = {0};
+static uint8_t displayBuf[LED_COUNT * CHANNELS] = {0};
 static uint8_t bfiG[LED_COUNT] = {0};
 static uint8_t bfiR[LED_COUNT] = {0};
 static uint8_t bfiB[LED_COUNT] = {0};
@@ -34,7 +42,9 @@ void setup() {
 
     // Attach LUT storage and precompute.
     solver.attachLUTs(solverValueLUT, solverBFILUT, solverFloorLUT, nullptr, LUT_SIZE);
-    solver.precompute(TemporalTrue16BFIPolicySolver::encodeStateFrom16);
+    solver.setLedColorOrder(RENDER_OPTIONS.colorOrder);
+    solver.setSolverLUTMode(SolverLUTMode::PerChannel);
+    solver.precompute(TemporalTrue16BFIPolicySolver::encodeStateFrom16, CHANNELS);
 
     // 16-bit RGB input.
     const uint16_t rQ16 = 52000;
@@ -50,11 +60,21 @@ void setup() {
     EncodedState stB = solver.solve(t.bQ16, 2);
     EncodedState stW = solver.solve(t.wQ16, 3);
 
+    EncodedState states[4] = {stG, stR, stB, stW};
+    BfiMapWriteView bfiMaps;
+    bfiMaps.bfiMapG = bfiG;
+    bfiMaps.bfiMapR = bfiR;
+    bfiMaps.bfiMapB = bfiB;
+    bfiMaps.bfiMapW1 = bfiW;
+
     for (uint16_t i = 0; i < LED_COUNT; ++i) {
-        SolverRuntime::commitPixelRGBW(
+        SolverRuntime::commitPixel(
             upperFrame, floorFrame,
-            bfiG, bfiR, bfiB, bfiW,
-            i, stG, stR, stB, stW);
+            bfiMaps,
+            i,
+            states,
+            CHANNELS,
+            RENDER_OPTIONS);
     }
 
     Serial.println("RGB16InputDemo — 16-bit RGB with RGBW extraction");
@@ -69,10 +89,17 @@ static constexpr uint32_t SERIAL_INTERVAL_MS = 200;
 static uint32_t lastSerialMs = 0;
 
 void loop() {
-    SolverRuntime::renderSubpixelBFI_RGBW(
+    BfiMapView bfiMaps;
+    bfiMaps.bfiMapG = bfiG;
+    bfiMaps.bfiMapR = bfiR;
+    bfiMaps.bfiMapB = bfiB;
+    bfiMaps.bfiMapW1 = bfiW;
+
+    SolverRuntime::renderLoopStatic(
         upperFrame, floorFrame,
-        bfiG, bfiR, bfiB, bfiW,
-        displayBuf, LED_COUNT, phase);
+        bfiMaps,
+        displayBuf, LED_COUNT, phase,
+        RENDER_OPTIONS);
 
     // --- LED .show() would go here in a real sketch ---
 

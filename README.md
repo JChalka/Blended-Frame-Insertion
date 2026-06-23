@@ -21,7 +21,7 @@ Each display cycle consists of `cycle_length` phases (default 5). Within one cyc
 - **(cycle\_length − bfi)** phases display the **upper value** (ceiling)
 - **bfi** phases display the **lower value** (floor)
 
-The perceived output integrates over the full cycle, producing fine-grained brightness steps between adjacent 8-bit levels. A 4096-entry per-channel temporal ladder maps every Q16 (0–65535) target to the optimal `(value, bfi, lowerValue)` tuple, selected from physically measured LED states.
+The perceived output integrates over the full cycle, producing fine-grained brightness steps between adjacent 8-bit levels. A 4096-entry temporal ladder maps every Q16 (0–65535) target to the optimal `(value, bfi, lowerValue)` tuple, selected from physically measured LED states. Production/calibrated output normally uses per-channel solver LUTs, while low-memory or bringup builds can opt into a shared solver LUT that stores and precomputes one LUT set reused by all logical channels.
 
 ### Phase Distribution Modes
 
@@ -55,24 +55,48 @@ solver.setPhaseMode(PhaseMode::DistributedGlobal);
 solver.setCycleLength(8);  // 8-phase global cycle → BFI 0..7
 
 // Render loop uses the internal tick counter:
-solver.renderBFI_RGBW(upper, floor, bfiG, bfiR, bfiB, bfiW, display, count);
+BfiMapView bfiMaps;
+bfiMaps.bfiMapG = bfiG;
+bfiMaps.bfiMapR = bfiR;
+bfiMaps.bfiMapB = bfiB;
+bfiMaps.bfiMapW1 = bfiW;
+
+RenderOptions renderOptions;
+renderOptions.colorOrder = LedColorOrder::GRBW;
+renderOptions.bfiMapStorage = BfiMapStorageMode::Separate;
+solver.renderLoop(upper, floor, bfiMaps, display, count, &renderOptions);
 showLEDs();
 bool cycleEnd = solver.advanceTick();  // returns true on cycle boundary
 ```
 
-The static `renderSubpixelBFI_*()` methods remain unchanged and always use FixedMask — existing sketches don't need modification. The new instance `renderBFI_*()` methods use the configured phase mode and internal tick counter.
+Use the consolidated render/commit APIs (`commitPixel`, `renderLoopStatic`, `renderIndexedStatic`, `renderLoop`, `renderIndexed`) because they accept explicit render options for channel layout, physical color order, and packed/separate BFI map storage.
 
 ## Features
 
 - **True 16-bit rendering** — 4096+ distinct brightness levels per channel from 8-bit LED hardware
-- **RGBW & RGB support** — white extraction from RGB, direct RGBW input, or white-limit clamping
+- **RGB, RGBW, RGBWW & RGBCCT direction** — RGB and RGBW are stable; RGBWW/RGBCCT support includes emulated fifth-channel bringup and 5-channel color-order/storage contracts
 - **Calibration-aware pipeline** — optional per-channel Q16 input calibration for device-specific correction
-- **Transfer curves** — pluggable gamma/tone-mapping curves (linear, gamma, BT.1886, HLG, PQ, sRGB, toe-gamma)
-- **Precomputed or runtime solving** — LUTs can be computed at boot or loaded from PROGMEM headers
+- **Transfer curves** — pluggable gamma/tone-mapping curves (linear, gamma, BT.1886, HLG, PQ, sRGB, toe-gamma); default storage is one shared curve with legacy per-channel curves available as opt-in
+- **Precomputed or runtime solving** — LUTs can be computed at boot or loaded from PROGMEM headers; per-channel LUTs are default, with opt-in shared solver LUT storage for low-memory/bringup use
 - **Distributed phase scheduling** — per-BFI natural cycle (1 upper + N lowers) with automatic duty derivation; optional Bresenham-even global-cycle mode for advanced use; legacy FixedMask mode preserved as default
-- **FastLED integration** — works alongside FastLED CRGB buffers with GRB byte-order handling
+- **Configurable LED byte order** — solver logical channel order is separated from physical LED byte order via `LedColorOrder` presets and custom channel maps
 - **Platform-agnostic core** — runs on Teensy 4.x, ESP32, and any Arduino-compatible board with sufficient RAM
 - **Implicit phase timing on NeoPixel-class LEDs** — SK6812/WS2812 transmission time acts as a natural phase timer; faster SPI chipsets (APA102, SK9822, HD108, etc.) require explicit timing control and show-cadence guards (see [Rendering Model § 6.2](tools/README_RENDERING_MODEL.md))
+
+### Pipeline and Storage Modes
+
+`SolverRuntime` separates three concerns that older examples often mixed together:
+
+- **Logical solver channels** — internal solver/commit order is GRB, GRBW, or GRBW1W2 depending on layout.
+- **Physical LED byte order** — `LedColorOrder` controls how logical channels are written to the output buffer. Use logical presets such as `RGB`, `RGBW`, or `RGBW1W2` when an upstream LED library already applies physical ordering.
+- **BFI map storage** — `BfiMapStorageMode::Separate` uses one BFI array per logical channel, while `BfiMapStorageMode::Packed` stores two 4-bit BFI values per byte.
+
+Solver LUT storage is independent of render/commit storage:
+
+- **PerChannel** (default): one value/BFI/floor/output-Q16 LUT set per logical channel. This remains the calibrated-output path.
+- **Shared** (opt-in): one value/BFI/floor/output-Q16 LUT set is precomputed and reused by all logical channels. This is intended for low-memory targets, quick bringup, one-channel/direct-output devices, or approximate experiments.
+
+Transfer curve storage also defaults to a single shared curve. Legacy per-channel transfer curves remain available with `TransferCurveMode::LegacyPerChannel` when calibrated per-channel tone mapping is required.
 
 ## Quick Start
 
@@ -99,19 +123,38 @@ void loop() {
     auto b = solver.solve(bQ16, 2);  // channel 2 = B
     auto w = solver.solve(wQ16, 3);  // channel 3 = W
 
-    // Commit to frame buffers
-    SolverRuntime::commitPixelRGBW(upperFrame, floorFrame,
-        bfiMapG, bfiMapR, bfiMapB, bfiMapW, pixelIndex, g, r, b, w);
+    EncodedState states[4] = {g, r, b, w};
+
+    BfiMapWriteView writeMaps;
+    writeMaps.bfiMapG = bfiMapG;
+    writeMaps.bfiMapR = bfiMapR;
+    writeMaps.bfiMapB = bfiMapB;
+    writeMaps.bfiMapW1 = bfiMapW;
+
+    RenderOptions options;
+    options.colorOrder = LedColorOrder::GRBW;
+    options.bfiMapStorage = BfiMapStorageMode::Separate;
+
+    // Commit to logical frame buffers + BFI maps.
+    SolverRuntime::commitPixel(upperFrame, floorFrame,
+        writeMaps, pixelIndex, states, 4, options);
+
+    BfiMapView readMaps;
+    readMaps.bfiMapG = bfiMapG;
+    readMaps.bfiMapR = bfiMapR;
+    readMaps.bfiMapB = bfiMapB;
+    readMaps.bfiMapW1 = bfiMapW;
 
     // Render each BFI phase — 5 phases per perceived frame at ≥600 Hz LED refresh
     for (uint8_t phase = 0; phase < 5; phase++) {
-        SolverRuntime::renderSubpixelBFI_RGBW(upperFrame, floorFrame,
-            bfiMapG, bfiMapR, bfiMapB, bfiMapW,
-            displayBuffer, pixelCount, phase);
+        SolverRuntime::renderLoopStatic(upperFrame, floorFrame,
+            readMaps, displayBuffer, pixelCount, phase, options);
         // Send displayBuffer to LEDs
     }
 }
 ```
+
+For internal-tick rendering, use the instance `renderLoop` / `renderIndexed` APIs and call `advanceTick()` after each displayed sub-frame. Static render calls take an explicit phase value; instance render calls use the configured phase mode and internal tick.
 
 ## API Reference
 
@@ -119,45 +162,37 @@ void loop() {
 
 | Method | Description |
 |--------|-------------|
-| `attachLUTs(value, bfi, floor, outputQ16, size)` | Attach pre-allocated LUT buffers (4 channels × size) |
-| `precompute(solverFn, numChannels=4)` | Populate LUTs by solving all Q16 values across channels (default 4 = GRBW) |
-| `loadPrecomputed(srcValue, srcBfi, srcFloor, srcOutputQ16, numChannels=4, srcLutSize=0)` | Load LUTs from PROGMEM or pre-built data; validates srcLutSize against attached buffer size when non-zero |
+| `attachLUTs(value, bfi, floor, outputQ16, size)` | Attach caller-owned LUT buffers sized for the selected solver LUT storage mode |
+| `setSolverLUTMode(mode)` | Select `SolverLUTMode::PerChannel` (default) or `SolverLUTMode::Shared` before precompute/load |
+| `precompute(solverFn, numChannels=4)` | Populate solver LUTs; Shared mode precomputes only one storage channel, PerChannel mode precomputes all logical channels |
+| `loadPrecomputed(srcValue, srcBfi, srcFloor, srcOutputQ16, numChannels=4, srcLutSize=0)` | Load LUTs from PROGMEM or pre-built data; Shared mode copies one storage channel; validates srcLutSize when non-zero |
 | `solve(q16, channel)` | Look up precomputed `EncodedState` for a Q16 input |
 | `config()` | Access `PolicyConfig` tuning knobs |
-| `setTransferCurve(r, g, b, w, buckets)` | Register per-channel transfer curves |
+| `setTransferCurve(curve, buckets)` | Register one shared transfer curve for all channels (default mode) |
+| `setTransferCurve(r, g, b, w, buckets)` | Register legacy per-channel transfer curves |
+| `setTransferCurveMode(mode)` | Select shared single-curve or legacy per-channel transfer-curve lookup mode |
 | `setCalibrationFunction(fn)` | Register per-channel Q16 calibration callback |
 | `extractRgbw(rQ16, gQ16, bQ16)` | Extract white from RGB (white = min of calibrated channels) |
+| `extractRgbwwEmulated(rQ16, gQ16, bQ16)` | Split extracted white into W1/W2 for RGBWW/RGBCCT bringup |
 | `applyWhiteLimit(r, g, b, w)` | Clamp white and redistribute to RGB |
 | `setWhiteLimit(limit)` | Set 0–255 white channel maximum |
-| `commitPixelRGBW(...)` | Write encoded RGBW state to frame/BFI buffers (static) |
-| `commitPixelRGB(...)` | Write encoded RGB state to frame/BFI buffers (static) |
-| `renderSubpixelBFI_RGBW(...)` | Render one BFI phase for RGBW pixels (static, full buffer) |
-| `renderSubpixelBFI_RGB(...)` | Render one BFI phase for RGB pixels (static, full buffer) |
-| `renderPixelBFI_RGBW(...)` | Render one BFI phase for a single RGBW pixel by index (static) |
-| `renderPixelBFI_RGB(...)` | Render one BFI phase for a single RGB pixel by index (static) |
-| `commitPixelRGBW_Packed(...)` | Write encoded RGBW state to frame buffers + packed BFI map (static) |
-| `commitPixelRGB_Packed(...)` | Write encoded RGB state to frame buffers + packed BFI map (static) |
-| `renderSubpixelBFI_RGBW_Packed(...)` | Render one BFI phase for RGBW pixels from packed BFI map (static, full buffer) |
-| `renderSubpixelBFI_RGB_Packed(...)` | Render one BFI phase for RGB pixels from packed BFI map (static, full buffer) |
-| `renderPixelBFI_RGBW_Packed(...)` | Render one BFI phase for a single RGBW pixel by index from packed BFI map (static) |
-| `renderPixelBFI_RGB_Packed(...)` | Render one BFI phase for a single RGB pixel by index from packed BFI map (static) |
+| `setLedColorOrder(order)` | Configure physical output byte order independently from solver logical order |
+| `setCustomColorOrderMap3/4/5(map)` | Provide custom logical-to-physical maps for unusual layouts |
+| `commitPixel(...)` | Consolidated static commit for RGB/RGBW/RGBWW plus packed/separate BFI map storage |
+| `renderLoopStatic(...)` | Consolidated static full-buffer render using explicit phase and `RenderOptions` |
+| `renderIndexedStatic(...)` | Consolidated static indexed render using explicit phase and `RenderOptions` |
+| `renderLoop(...)` | Consolidated instance full-buffer render using configured phase mode and internal tick |
+| `renderIndexed(...)` | Consolidated instance indexed render using configured phase mode and internal tick |
 | `setCubeLUT3D(const CubeLUT3D*)` | Attach a loaded 3D cube for runtime color correction |
 | `setCubeLUT3DEnabled(bool)` | Enable/disable the 3D cube LUT stage in the pipeline |
 | `cubeLUT3DEnabled()` | Query whether the cube LUT stage is active |
-| `applyCubeLUT3D(rQ16, gQ16, bQ16)` | Trilinear lookup through the attached cube, returns `RgbwTargets` |
+| `applyCubeLUT3D(rQ16, gQ16, bQ16)` | RGBW-compatible lookup through the attached cube, returns `RgbwTargets` |
+| `applyCubeLUT3D_RGBWW(rQ16, gQ16, bQ16)` | RGBWW/RGBCCT-capable cube lookup returning `RgbwwTargets` |
 | `setPhaseMode(mode)` | Set phase distribution: `FixedMask` (legacy), `Distributed` (per-BFI cycle), or `DistributedGlobal` (Bresenham-even) |
 | `setCycleLength(len)` | Set global cycle length for DistributedGlobal mode (2–16) |
 | `advanceTick()` | Step the internal tick counter; returns `true` on cycle boundary |
 | `resetTick()` | Reset the internal tick counter to 0 |
 | `channelActiveOnCurrentTick(bfi)` | Query whether a BFI level shows upper on the current tick |
-| `renderBFI_RGBW(...)` | Instance render using configured phase mode + internal tick (RGBW, separate BFI maps, full buffer) |
-| `renderBFI_RGB(...)` | Instance render using configured phase mode + internal tick (RGB, separate BFI maps, full buffer) |
-| `renderBFI_RGBW_Packed(...)` | Instance render using configured phase mode + internal tick (RGBW, packed BFI map, full buffer) |
-| `renderBFI_RGB_Packed(...)` | Instance render using configured phase mode + internal tick (RGB, packed BFI map, full buffer) |
-| `renderPixel_RGBW(...)` | Instance render of a single RGBW pixel by index (separate BFI maps) |
-| `renderPixel_RGB(...)` | Instance render of a single RGB pixel by index (separate BFI maps) |
-| `renderPixel_RGBW_Packed(...)` | Instance render of a single RGBW pixel by index (packed BFI map) |
-| `renderPixel_RGB_Packed(...)` | Instance render of a single RGB pixel by index (packed BFI map) |
 | `dumpLUTHeader(Serial)` | Emit embeddable PROGMEM header of current LUTs |
 
 ### Key Types
@@ -185,17 +220,22 @@ struct PolicyConfig {
     uint8_t  highlightBypassStart = 240;
     // ... and more — see TemporalBFI.h
 };
+
+struct RenderOptions {
+    LedColorOrder colorOrder = LedColorOrder::GRBW;
+    BfiMapStorageMode bfiMapStorage = BfiMapStorageMode::Separate;
+};
 ```
 
 ### CubeLUT3D
 
-Platform-agnostic 3D color-correction cube loader and trilinear interpolation engine. Cubes can be loaded from SD card binary files, PROGMEM header arrays, or external QSPI flash.
+Platform-agnostic 3D color-correction cube loader and interpolation engine. Cubes can be loaded from SD card binary files, PROGMEM header arrays, or external QSPI flash. RGB cubes use trilinear interpolation; 4-channel and 5-channel lookups use tetrahedral interpolation to avoid illegal topology in strict sub-gamut solves.
 
 | Method / Field | Description |
 |----------------|-------------|
 | `attach(data, gridSize, channels)` | Attach a non-owning pointer to an existing cube buffer |
 | `loadFromFileBuffer(buf, len)` | Parse a 4-byte header + payload from a raw file buffer |
-| `lookup(rQ16, gQ16, bQ16, out[])` | Trilinear interpolation — writes 3 (RGB) or 4 (RGBW) uint16 results |
+| `lookup(rQ16, gQ16, bQ16, out[])` | Interpolated lookup — writes 3 (RGB) or 4+ channel uint16 results |
 | `isValid()` | Returns `true` if data is attached and grid/channels are set |
 | `isRGBW()` | Returns `true` if `channels == 4` |
 | `dataBytes(grid, ch)` | (static) Payload size in bytes for a given grid and channel count |
@@ -206,6 +246,8 @@ Platform-agnostic 3D color-correction cube loader and trilinear interpolation en
 Binary cube format: `[uint16 gridSize LE][uint16 channels LE][N³ × C × uint16 payload LE]`
 
 ## Examples
+
+Examples use the consolidated render/commit APIs and explicitly declare color-order plus solver-LUT policy where TemporalBFI is involved.
 
 | Example | Description | Dependencies |
 |---------|-------------|--------------|

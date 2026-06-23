@@ -9,6 +9,11 @@
 #include <TemporalBFI.h>
 #include <TemporalBFIRuntime.h>
 
+// Direct 3DLUT/1DLUT correction companion sketch. The host GUI applies the
+// correction/cube and sends already-solved RGB/RGBW/RGBWW channel values here.
+// ObjectFLED currently emits RGB/RGBW only. RGBWW/RGBCCT requests are rejected
+// until native 5-channel output lands; W2 is never folded into W silently.
+
 #define NUM_PINS 2
 #define LEDS_PER_PIN 48
 #define LED_COUNT (NUM_PINS * LEDS_PER_PIN)
@@ -40,11 +45,35 @@
 #define OP_SET_SOLVER_ENABLED 0x29
 #define OP_SET_TEMPORAL_BLEND 0x2A
 #define OP_SET_FILL16 0x2B
+#define OP_SET_OUTPUT_MODE 0x2E
+#define OP_SET_DIRECT_RGBW16 0x2F
+#define OP_SET_DIRECT_RGBWW16 0x30
 #define PHASE_MODE_AUTO 0x00
 #define PHASE_MODE_MANUAL 0x01
+#define OUTPUT_MODE_RGB 0x00
+#define OUTPUT_MODE_RGBW 0x01
+#define OUTPUT_MODE_RGBWW 0x02
+
+#ifndef TEMPORAL_CAL_TARGET_OUTPUT_MODE
+#define TEMPORAL_CAL_TARGET_OUTPUT_MODE OUTPUT_MODE_RGBW
+#endif
+
+#if TEMPORAL_CAL_TARGET_OUTPUT_MODE == OUTPUT_MODE_RGB
+#define TEMPORAL_CAL_OBJECTFLED_CORDER CORDER_GRB
+#define TEMPORAL_CAL_TARGET_CHANNELS 3
+#elif TEMPORAL_CAL_TARGET_OUTPUT_MODE == OUTPUT_MODE_RGBW
+#define TEMPORAL_CAL_OBJECTFLED_CORDER CORDER_GRBW
+#define TEMPORAL_CAL_TARGET_CHANNELS 4
+#elif TEMPORAL_CAL_TARGET_OUTPUT_MODE == OUTPUT_MODE_RGBWW
+#error "TEMPORAL_CAL_TARGET_OUTPUT_MODE=OUTPUT_MODE_RGBWW requires native 5-channel ObjectFLED support."
+#else
+#error "Unsupported TEMPORAL_CAL_TARGET_OUTPUT_MODE"
+#endif
+
 #define STATUS_OK 0x00
 #define STATUS_BAD_PAYLOAD 0x01
 #define STATUS_BAD_OPCODE 0x02
+#define STATUS_UNSUPPORTED_OUTPUT_MODE 0x04
 
 const uint8_t ledPins[NUM_PINS] = {5, 21};
 
@@ -58,8 +87,9 @@ DMAMEM uint8_t bfiMapW[LED_COUNT] = {0};
 bool renderEnabled = true;
 bool manualPhaseMode = false;
 bool solverEnabled = false;
+uint8_t outputMode = OUTPUT_MODE_RGBW;
 uint32_t temporalTick = 0;
-ObjectFLED leds(LED_COUNT, displayBuffer, CORDER_GRBW, NUM_PINS, ledPins, 0);
+ObjectFLED leds(LED_COUNT, displayBuffer, TEMPORAL_CAL_OBJECTFLED_CORDER, NUM_PINS, ledPins, 0);
 
 static constexpr uint16_t SOLVER_LUT_SIZE = TemporalBFIRuntime::SOLVER_LUT_SIZE;
 static_assert(TemporalBFI::SOLVER_FIXED_BFI_LEVELS == (MAX_BFI_FRAMES + 1), "SOLVER_FIXED_BFI_LEVELS must match MAX_BFI_FRAMES + 1");
@@ -70,6 +100,10 @@ DMAMEM uint8_t solverValueLUT[4][SOLVER_LUT_SIZE] = {0};
 DMAMEM uint8_t solverValueFloorLUT[4][SOLVER_LUT_SIZE] = {0};
 
 TemporalBFI::SolverRuntime solver;
+static constexpr TemporalBFI::RenderOptions RENDER_OPTIONS = {
+  TemporalBFI::LedColorOrder::GRBW,
+  TemporalBFI::BfiMapStorageMode::Separate,
+};
 
 enum class DirectFrameState : uint8_t {
   SYNC0,
@@ -106,6 +140,38 @@ static inline uint8_t clampBfi(int value) {
 
 static inline void normalizeTemporalTick() {
   temporalTick %= (uint32_t)TEMPORAL_BFI_CYCLE;
+}
+
+static inline uint8_t activeLogicalChannels() {
+  return (outputMode == OUTPUT_MODE_RGB) ? 3 : (outputMode == OUTPUT_MODE_RGBWW ? 5 : 4);
+}
+
+static inline uint8_t objectFledOutputChannels() {
+  return TEMPORAL_CAL_TARGET_CHANNELS;
+}
+
+static inline uint8_t supportedOutputModeMask() {
+  uint8_t mask = 0x01;  // RGB
+#if TEMPORAL_CAL_TARGET_OUTPUT_MODE >= OUTPUT_MODE_RGBW
+  mask |= 0x02;
+#endif
+#if TEMPORAL_CAL_TARGET_OUTPUT_MODE >= OUTPUT_MODE_RGBWW
+  mask |= 0x04;
+#endif
+  return mask;
+}
+
+static inline bool outputModeSupported(uint8_t mode) {
+  if (mode == OUTPUT_MODE_RGB) return true;
+  if (mode == OUTPUT_MODE_RGBW) return TEMPORAL_CAL_TARGET_OUTPUT_MODE >= OUTPUT_MODE_RGBW;
+  if (mode == OUTPUT_MODE_RGBWW) return TEMPORAL_CAL_TARGET_OUTPUT_MODE >= OUTPUT_MODE_RGBWW;
+  return false;
+}
+
+static inline bool setOutputMode(uint8_t mode) {
+  if (!outputModeSupported(mode)) return false;
+  outputMode = mode;
+  return true;
 }
 
 static inline TemporalTrue16BFIPolicySolver::EncodedState solveTrue16State(uint16_t valueQ16, uint8_t channel) {
@@ -148,7 +214,7 @@ void sendLog(const char* text) {
 }
 
 void sendCalResponse(uint8_t op, uint8_t status) {
-  uint8_t payload[18];
+  uint8_t payload[32] = {0};
   payload[0] = op;
   payload[1] = status;
   payload[2] = renderEnabled ? 1 : 0;
@@ -167,6 +233,13 @@ void sendCalResponse(uint8_t op, uint8_t status) {
   payload[15] = 0;
   payload[16] = 0;
   payload[17] = solverEnabled ? 1 : 0;
+  payload[18] = outputMode;
+  payload[19] = supportedOutputModeMask();
+  payload[20] = objectFledOutputChannels();
+  payload[21] = activeLogicalChannels();
+  payload[22] = TEMPORAL_CAL_TARGET_OUTPUT_MODE;
+  payload[23] = 0;  // no fold/stub active: unsupported modes are rejected
+  payload[29] = 1;  // response extension version
   sendFrame(FRAME_KIND_CAL_RSP, payload, sizeof(payload));
 }
 
@@ -200,7 +273,13 @@ void fillAll(uint8_t r, uint8_t g, uint8_t b, uint8_t w, uint8_t bfiR, uint8_t b
   normalizeTemporalTick();
 }
 
-void fillAll16(uint16_t r16, uint16_t g16, uint16_t b16, uint16_t w16) {
+bool fillAllOutput16(uint16_t r16, uint16_t g16, uint16_t b16, uint16_t w16) {
+  if (!outputModeSupported(outputMode)) return false;
+  if (outputMode == OUTPUT_MODE_RGB) {
+    if (w16 != 0) return false;
+    w16 = 0;
+  }
+
   const auto gState = solveTrue16State(g16, 0);
   const auto rState = solveTrue16State(r16, 1);
   const auto bState = solveTrue16State(b16, 2);
@@ -223,6 +302,15 @@ void fillAll16(uint16_t r16, uint16_t g16, uint16_t b16, uint16_t w16) {
   }
 
   normalizeTemporalTick();
+  return true;
+}
+
+bool fillAll16(uint16_t r16, uint16_t g16, uint16_t b16, uint16_t w16) {
+  return fillAllOutput16(r16, g16, b16, w16);
+}
+
+bool fillAllRgbww16(uint16_t, uint16_t, uint16_t, uint16_t, uint16_t) {
+  return false;
 }
 
 void setTemporalBlend(
@@ -259,10 +347,17 @@ void setTemporalBlend(
 
 void renderIndependentSubpixelBFI() {
   const uint8_t phase = (uint8_t)(temporalTick % (uint32_t)TEMPORAL_BFI_CYCLE);
-  TemporalBFI::SolverRuntime::renderSubpixelBFI_RGBW(
+  TemporalBFI::BfiMapView bfiMaps;
+  bfiMaps.bfiMapG = bfiMapG;
+  bfiMaps.bfiMapR = bfiMapR;
+  bfiMaps.bfiMapB = bfiMapB;
+  bfiMaps.bfiMapW1 = bfiMapW;
+
+  TemporalBFI::SolverRuntime::renderLoopStatic(
       upperFrameBuffer, lowerFrameBuffer,
-      bfiMapG, bfiMapR, bfiMapB, bfiMapW,
-      displayBuffer, LED_COUNT, phase);
+      bfiMaps,
+      displayBuffer, LED_COUNT, phase,
+      RENDER_OPTIONS);
 }
 
 uint16_t readU16(const uint8_t* payload, uint8_t offset) {
@@ -324,9 +419,21 @@ void handleCalFrame(const uint8_t* payload, uint16_t payloadLen) {
       if (payloadLen < 2) status = STATUS_BAD_PAYLOAD;
       else solverEnabled = true;
       break;
+    case OP_SET_OUTPUT_MODE:
+      if (payloadLen < 2) status = STATUS_BAD_PAYLOAD;
+      else if (!setOutputMode(payload[1])) status = STATUS_UNSUPPORTED_OUTPUT_MODE;
+      break;
     case OP_SET_FILL16:
       if (payloadLen < 9) status = STATUS_BAD_PAYLOAD;
-      else fillAll16(readU16(payload, 1), readU16(payload, 3), readU16(payload, 5), readU16(payload, 7));
+      else if (!fillAll16(readU16(payload, 1), readU16(payload, 3), readU16(payload, 5), readU16(payload, 7))) status = STATUS_UNSUPPORTED_OUTPUT_MODE;
+      break;
+    case OP_SET_DIRECT_RGBW16:
+      if (payloadLen < 9) status = STATUS_BAD_PAYLOAD;
+      else if (!fillAll16(readU16(payload, 1), readU16(payload, 3), readU16(payload, 5), readU16(payload, 7))) status = STATUS_UNSUPPORTED_OUTPUT_MODE;
+      break;
+    case OP_SET_DIRECT_RGBWW16:
+      if (payloadLen < 11) status = STATUS_BAD_PAYLOAD;
+      else if (!fillAllRgbww16(readU16(payload, 1), readU16(payload, 3), readU16(payload, 5), readU16(payload, 7), readU16(payload, 9))) status = STATUS_UNSUPPORTED_OUTPUT_MODE;
       break;
     case OP_COMMIT:
       break;
@@ -417,13 +524,15 @@ void setup() {
   cfg.relativeErrorDivisor = 24;
   cfg.minErrorQ16 = 64;
   cfg.enableInputQ16Calibration = false;
+  solver.setLedColorOrder(RENDER_OPTIONS.colorOrder);
+  solver.setSolverLUTMode(TemporalBFI::SolverLUTMode::PerChannel);
 
   solver.attachLUTs(&solverValueLUT[0][0], &solverBFILUT[0][0],
                     &solverValueFloorLUT[0][0], nullptr, SOLVER_LUT_SIZE);
 
   sendLog("Generating precomputed true16 solver LUT...");
 
-  solver.precompute(TemporalTrue16BFIPolicySolver::encodeStateFrom16);
+  solver.precompute(TemporalTrue16BFIPolicySolver::encodeStateFrom16, 4);
 
   sendLog("Precomputed true16 solver LUT ready.");
 

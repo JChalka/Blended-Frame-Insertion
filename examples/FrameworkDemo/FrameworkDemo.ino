@@ -1,6 +1,7 @@
 // FrameworkDemo.ino
 // Minimal TemporalBFI pipeline: solve → commit → BFI render.
 // Calls the policy solver directly — no LUT precomputation needed.
+// Uses consolidated commit/render APIs with explicit color-order settings.
 
 #include <Arduino.h>
 #include <TemporalBFI.h>
@@ -8,11 +9,17 @@
 
 static constexpr uint16_t LED_COUNT = 4;
 static constexpr uint8_t  CYCLE_LEN = 5;
+static constexpr uint8_t  CHANNELS  = 4;
+
+static constexpr TemporalBFI::RenderOptions RENDER_OPTIONS = {
+    TemporalBFI::LedColorOrder::GRBW,
+    TemporalBFI::BfiMapStorageMode::Separate,
+};
 
 // Pixel buffers (GRBW byte order, 4 bytes per pixel).
-static uint8_t upperFrame[LED_COUNT * 4] = {0};
-static uint8_t floorFrame[LED_COUNT * 4] = {0};
-static uint8_t displayBuf[LED_COUNT * 4] = {0};
+static uint8_t upperFrame[LED_COUNT * CHANNELS] = {0};
+static uint8_t floorFrame[LED_COUNT * CHANNELS] = {0};
+static uint8_t displayBuf[LED_COUNT * CHANNELS] = {0};
 
 // Per-pixel BFI maps (one per sub-pixel channel).
 static uint8_t bfiG[LED_COUNT] = {0};
@@ -38,12 +45,22 @@ void setup() {
     TemporalBFI::EncodedState stB = TemporalTrue16BFIPolicySolver::encodeStateFrom16(bQ16, 2);
     TemporalBFI::EncodedState stW = {0, 0, 0, 0, 0};
 
+    TemporalBFI::EncodedState states[4] = {stG, stR, stB, stW};
+    TemporalBFI::BfiMapWriteView bfiMaps;
+    bfiMaps.bfiMapG = bfiG;
+    bfiMaps.bfiMapR = bfiR;
+    bfiMaps.bfiMapB = bfiB;
+    bfiMaps.bfiMapW1 = bfiW;
+
     // Commit solved state to every LED.
     for (uint16_t i = 0; i < LED_COUNT; ++i) {
-        TemporalBFI::SolverRuntime::commitPixelRGBW(
+        TemporalBFI::SolverRuntime::commitPixel(
             upperFrame, floorFrame,
-            bfiG, bfiR, bfiB, bfiW,
-            i, stG, stR, stB, stW);
+            bfiMaps,
+            i,
+            states,
+            CHANNELS,
+            RENDER_OPTIONS);
     }
 
     Serial.println("FrameworkDemo — minimal TemporalBFI pipeline");
@@ -63,10 +80,17 @@ static uint32_t lastSerialMs = 0;
 
 void loop() {
     // Render the current BFI phase into the display buffer.
-    TemporalBFI::SolverRuntime::renderSubpixelBFI_RGBW(
+    TemporalBFI::BfiMapView bfiMaps;
+    bfiMaps.bfiMapG = bfiG;
+    bfiMaps.bfiMapR = bfiR;
+    bfiMaps.bfiMapB = bfiB;
+    bfiMaps.bfiMapW1 = bfiW;
+
+    TemporalBFI::SolverRuntime::renderLoopStatic(
         upperFrame, floorFrame,
-        bfiG, bfiR, bfiB, bfiW,
-        displayBuf, LED_COUNT, phase);
+        bfiMaps,
+        displayBuf, LED_COUNT, phase,
+        RENDER_OPTIONS);
 
     // --- LED .show() would go here in a real sketch ---
 

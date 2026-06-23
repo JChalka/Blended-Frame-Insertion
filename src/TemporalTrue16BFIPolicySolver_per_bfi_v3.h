@@ -64,6 +64,8 @@ static inline const TemporalBFI::LadderEntry* ladderForChannel(uint8_t channel, 
         case 0: count = TemporalBFIRuntimeLUT::LADDER_G_COUNT; return TemporalBFIRuntimeLUT::LADDER_G;
         case 1: count = TemporalBFIRuntimeLUT::LADDER_R_COUNT; return TemporalBFIRuntimeLUT::LADDER_R;
         case 2: count = TemporalBFIRuntimeLUT::LADDER_B_COUNT; return TemporalBFIRuntimeLUT::LADDER_B;
+        case 3:
+        case 4: // RGBWW emulation path: reuse W ladder for W2.
         default: count = TemporalBFIRuntimeLUT::LADDER_W_COUNT; return TemporalBFIRuntimeLUT::LADDER_W;
     }
 }
@@ -75,6 +77,8 @@ static inline const uint8_t* lowerLadderForChannel(uint8_t channel, uint16_t& co
         case 0: count = TemporalBFIRuntimeLUT::LADDER_G_COUNT; return TemporalBFIRuntimeLUT::LADDER_G_LOWER;
         case 1: count = TemporalBFIRuntimeLUT::LADDER_R_COUNT; return TemporalBFIRuntimeLUT::LADDER_R_LOWER;
         case 2: count = TemporalBFIRuntimeLUT::LADDER_B_COUNT; return TemporalBFIRuntimeLUT::LADDER_B_LOWER;
+        case 3:
+        case 4: // RGBWW emulation path: reuse W lower ladder for W2.
         default: count = TemporalBFIRuntimeLUT::LADDER_W_COUNT; return TemporalBFIRuntimeLUT::LADDER_W_LOWER;
     }
 }

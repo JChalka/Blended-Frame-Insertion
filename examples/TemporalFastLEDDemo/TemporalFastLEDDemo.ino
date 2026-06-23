@@ -16,7 +16,13 @@ static constexpr uint16_t LED_COUNT = 16;
 static constexpr uint8_t  CYCLE_LEN = 5;
 static constexpr uint8_t  DATA_PIN  = 2;
 static constexpr uint16_t LUT_SIZE  = TemporalBFIRuntime::SOLVER_LUT_SIZE;
+static constexpr uint8_t  CHANNELS  = 3;
 static constexpr uint32_t MIN_SHOW_INTERVAL_US = 1600u;  // 625 FPS max
+
+static constexpr RenderOptions RENDER_OPTIONS = {
+    LedColorOrder::GRB,
+    BfiMapStorageMode::Separate,
+};
 
 // Solver LUTs.
 static uint8_t solverValueLUT[4 * LUT_SIZE];
@@ -44,25 +50,40 @@ static uint8_t phase = 0;
 
 // Solve 16-bit source colors and commit to the BFI frame buffers.
 static void solveAndCommit(uint16_t count) {
+    BfiMapWriteView bfiMaps;
+    bfiMaps.bfiMapG = bfiG;
+    bfiMaps.bfiMapR = bfiR;
+    bfiMaps.bfiMapB = bfiB;
+
     for (uint16_t i = 0; i < count; ++i) {
         // Channel map: 0=G, 1=R, 2=B.
         EncodedState stG = solver.solve(srcG[i], 0);
         EncodedState stR = solver.solve(srcR[i], 1);
         EncodedState stB = solver.solve(srcB[i], 2);
 
-        SolverRuntime::commitPixelRGB(
+        EncodedState states[CHANNELS] = {stG, stR, stB};
+        SolverRuntime::commitPixel(
             upperFrame, floorFrame,
-            bfiG, bfiR, bfiB,
-            i, stG, stR, stB);
+            bfiMaps,
+            i,
+            states,
+            CHANNELS,
+            RENDER_OPTIONS);
     }
 }
 
 // Render one BFI phase and write back to the CRGB display array.
 static void renderToCRGB(CRGB* dst, uint16_t count, uint8_t ph) {
-    SolverRuntime::renderSubpixelBFI_RGB(
+    BfiMapView bfiMaps;
+    bfiMaps.bfiMapG = bfiG;
+    bfiMaps.bfiMapR = bfiR;
+    bfiMaps.bfiMapB = bfiB;
+
+    SolverRuntime::renderLoopStatic(
         upperFrame, floorFrame,
-        bfiG, bfiR, bfiB,
-        displayBuf, count, ph);
+        bfiMaps,
+        displayBuf, count, ph,
+        RENDER_OPTIONS);
 
     // Map internal GRB byte order to CRGB (RGB memory order).
     for (uint16_t i = 0; i < count; ++i) {
@@ -81,7 +102,9 @@ void setup() {
     FastLED.setBrightness(255);
 
     solver.attachLUTs(solverValueLUT, solverBFILUT, solverFloorLUT, nullptr, LUT_SIZE);
-    solver.precompute(TemporalTrue16BFIPolicySolver::encodeStateFrom16);
+    solver.setLedColorOrder(RENDER_OPTIONS.colorOrder);
+    solver.setSolverLUTMode(SolverLUTMode::PerChannel);
+    solver.precompute(TemporalTrue16BFIPolicySolver::encodeStateFrom16, CHANNELS);
 
     // Fill a simple gradient in 16-bit Q16 space.
     for (uint16_t i = 0; i < LED_COUNT; ++i) {

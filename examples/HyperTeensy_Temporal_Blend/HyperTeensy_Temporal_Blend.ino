@@ -94,6 +94,10 @@ DMAMEM uint8_t solverValueFloorLUT[4][SOLVER_LUT_SIZE] = { 0 };
 #endif
 
 TemporalBFI::SolverRuntime solver;
+static constexpr TemporalBFI::RenderOptions kRgbwRenderOptions = {
+  TemporalBFI::LedColorOrder::GRBW,
+  TemporalBFI::BfiMapStorageMode::Separate,
+};
 bool runtimeUseDerivedSolverLutSize = ENABLE_RUNTIME_DERIVED_SOLVER_LUT_SIZE;
 uint16_t runtimeActiveSolverLutSize = ENABLE_RUNTIME_DERIVED_SOLVER_LUT_SIZE ? DERIVED_SOLVER_LUT_SIZE : SOLVER_LUT_SIZE;
 
@@ -1032,11 +1036,21 @@ inline void rgbToRgbw(uint16_t index, uint16_t rInputQ16, uint16_t gInputQ16, ui
   auto bBase = solveQ16State(bQ16, 2);
   auto wBase = solveQ16State(wQ16, 3);
 
+    TemporalBFI::EncodedState states[4] = {gBase, rBase, bBase, wBase};
+    TemporalBFI::BfiMapWriteView bfiMaps;
+    bfiMaps.bfiMapG = bfiMapG;
+    bfiMaps.bfiMapR = bfiMapR;
+    bfiMaps.bfiMapB = bfiMapB;
+    bfiMaps.bfiMapW1 = bfiMapW;
+
   // Commit frame + floor buffers and BFI maps via library.
-  TemporalBFI::SolverRuntime::commitPixelRGBW(
+    TemporalBFI::SolverRuntime::commitPixel(
       frameBuffer, frameFloorBuffer,
-      bfiMapG, bfiMapR, bfiMapB, bfiMapW,
-      index, gBase, rBase, bBase, wBase);
+      bfiMaps,
+      index,
+      states,
+      4,
+      kRgbwRenderOptions);
 
   // Apply runtime BFI overrides after commit.
   bfiMapR[index] = clampToRuntimeMaxBfi(bfiMapR[index]);
@@ -2376,12 +2390,19 @@ void renderIndependentSubpixelBFI()
 
   // Fused render + power/diagnostics pass: render each pixel by index,
   // then accumulate power estimation in the same loop iteration.
+  TemporalBFI::BfiMapView bfiMaps;
+  bfiMaps.bfiMapG = bfiMapG;
+  bfiMaps.bfiMapR = bfiMapR;
+  bfiMaps.bfiMapB = bfiMapB;
+  bfiMaps.bfiMapW1 = bfiMapW;
+
   for (uint16_t i = 0; i < LED_COUNT; i++)
   {
-    TemporalBFI::SolverRuntime::renderPixelBFI_RGBW(
+    TemporalBFI::SolverRuntime::renderIndexedStatic(
         latchedFrameBuffer, latchedFloorFrameBuffer,
-        bfiMapG, bfiMapR, bfiMapB, bfiMapW,
-        displayBuffer, i, bfiPhase);
+        bfiMaps,
+        displayBuffer, i, bfiPhase,
+        kRgbwRenderOptions);
 
     const uint8_t bfiG = bfiMapG[i];
     const uint8_t bfiR = bfiMapR[i];
@@ -2486,6 +2507,10 @@ void setup() {
   cfg.maxBFI = MAX_BFI_FRAMES;
   cfg.relativeErrorDivisor = 24;
   cfg.minErrorQ16 = 64;
+
+  // Make render output order and LUT storage policy explicit in this sketch.
+  solver.setLedColorOrder(kRgbwRenderOptions.colorOrder);
+  solver.setSolverLUTMode(TemporalBFI::SolverLUTMode::PerChannel);
 
   // Register solver callbacks (decoupled from library .cpp).
   solver.setCalibrationFunction([](uint16_t q16, uint8_t ch) -> uint16_t {

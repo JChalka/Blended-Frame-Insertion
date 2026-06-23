@@ -22,7 +22,7 @@ where $\vec{C} = (X, Y, Z)$ in CIE 1931 colorimetry. This is a linear temporal b
 
 A **state** is the 5-tuple `(channel, mode, lower_value, upper_value, bfi)`.
 
-- **Channels**: R, G, B, W — each calibrated independently.
+- **Channels**: R, G, B, W for RGBW capture/calibration. Runtime render paths now also define 5-channel RGBWW/RGBCCT-style layouts (`W1/W2` or CCT-style dual white) with either emulated fifth-channel behavior or native fifth-channel LUT storage.
 - **fill8 anchors** at `(channel, "fill8", 0, v, 0)` define the absolute colorimetric response at each 8-bit level. These are the ground truth for all interpolation.
 - **blend8 states** span the 4D space of `(lower_value, upper_value, bfi)` per channel, producing fine-grained brightness steps between adjacent fill8 levels.
 
@@ -31,7 +31,7 @@ A **state** is the 5-tuple `(channel, mode, lower_value, upper_value, bfi)`.
 For a single channel with `max_bfi = 4`:
 
 - 256 fill8 anchors (v = 0..255)
-- Up to 256 × 256 × 4 = 262,144 blend8 states (most physically meaningful when `lower_value < upper_value`)
+- Up to `(256 × 255 / 2) × 4 = 130,560` blend8 states when only physically meaningful `lower_value < upper_value` pairs are counted
 - The **span** of a blend8 state is `upper_value − lower_value`
 
 The fill8 anchors form the monotonic backbone: $Y_\text{fill8}(v)$ must be non-decreasing in $v$.
@@ -160,23 +160,23 @@ The emission order (dense state rows sorted by channel → lower → bfi → upp
 
 ## 4. Downstream: LUT Solver
 
-The combined dataset (pruned real captures + interpolated synthetic captures) feeds the solver, which computes:
+The combined dataset (pruned real captures + interpolated synthetic captures) feeds the solver/tooling pipeline, which computes:
 
-1. **Transfer curves** — per-channel Q16 (0–65535) monotonic mappings from 8-bit input to measured Y
+1. **Transfer curves** — Q16 (0–65535) monotonic mappings from input to measured/target output. Runtime defaults to a single shared transfer curve; legacy per-channel curves remain available when calibrated channel-specific tone mapping is required.
 2. **RGBW calibration headers** — per-channel gain/offset profiles for the LED driver
-3. **Solver profiles** — tuned parameters for the runtime interpolation engine on the Teensy
+3. **Solver profiles / precomputed solver LUTs** — value, BFI, floor, and optional output-Q16 tables for runtime solving
 
-The solver consumes the state-space XYZ data and produces the firmware artifacts (.h headers with `PROGMEM` arrays) that the Teensy loads at boot.
+The solver consumes the state-space XYZ data and produces firmware artifacts (.h headers with `PROGMEM` arrays) that the MCU can load at boot. Per-channel solver LUTs remain the calibrated-output default. A separate opt-in shared solver LUT mode stores and precomputes exactly one solver LUT set and reuses it for all logical channels; this is a low-memory / bringup / approximate mode, not a calibrated-output replacement.
 
 ### 4.1 3D Color Correction Cubes
 
 For full-gamut color correction beyond per-channel 1D calibration, the pipeline supports 3D cube LUTs loaded through the `CubeLUT3D` interface. Two paths exist:
 
-- **Measured RGBW cubes** — Built by `rgbw_lut_gui.py` / `build_measured_rgbw_lut.py` from colorimeter-measured RGBW patch sets. These capture the LED hardware's actual color response and produce RGBW (4-channel) cubes optimized for white-channel extraction. Headers are emitted with `PROGMEM` to reside in flash.
+- **Measured RGBW/RGBWW cubes** — Built by `rgbw_lut_gui.py` / `build_measured_rgbw_lut.py` from colorimeter-measured patch sets. These capture the LED hardware's actual color response and produce RGBW (4-channel) or RGBWW/RGBCCT-style (5-channel) cubes optimized for white-channel or dual-white extraction. Headers are emitted with `PROGMEM` to reside in flash.
 
 - **External `.cube` files** — Standard RGB 3D LUTs from any profiling tool (DisplayCAL, DaVinci Resolve, ArgyllCMS, CalMAN, etc.) can be converted to CubeLUT3D-compatible binary or PROGMEM headers via `cube_to_header.py`. This allows users to leverage existing display calibration workflows without requiring the full RGBW capture pipeline.
 
-Both paths produce data in the same interleaved Q16 format consumed by `CubeLUT3D::attach()` and `CubeLUT3D::loadFromFileBuffer()`.
+Both paths produce data in the same interleaved Q16 format consumed by `CubeLUT3D::attach()` and `CubeLUT3D::loadFromFileBuffer()`. RGB cubes use trilinear interpolation. Four-channel and five-channel output paths use tetrahedral interpolation in the runtime lookup layer because strict multi-emitter solves can otherwise cross illegal topology inside the measured sub-gamut.
 
 ## 5. Diagnostic Metrics
 
@@ -297,7 +297,7 @@ On dual-core architectures (ESP32), the render loop should spin on a dedicated c
 Any device capable of the following should be able to drive the temporal BFI system:
 
 - **Parallel output**: ~800 kHz–25 MHz on multiple pins simultaneously
-- **Memory**: Sufficient RAM to store the LUT (per-channel Q16 transfer curves + blend lookup tables)
+- **Memory**: Sufficient RAM/flash/DMAMEM for solver LUT storage, transfer curves, render buffers, and LED backend buffers
 - **Processing**: Fast enough to process incoming data and compute blended output within the per-cycle budget
 - **Dual-core preferred**: Dedicated render core + data processing core for sustained high frame rates
 
@@ -305,48 +305,58 @@ Any device capable of the following should be able to drive the temporal BFI sys
 
 TemporalBFI memory usage splits into two independent pools:
 
-1. **Solver bucket tables**: fixed cost per configured bucket count, independent of LED count.
+1. **Solver/transfer bucket tables**: fixed cost per configured bucket count, independent of LED count.
 2. **Render state buffers**: per-pixel cost for upper/lower values, BFI maps, and the active display buffer.
 
-The current True16 solver tables use three `uint8_t[channel_count][bucket_count]` arrays:
+The current True16 solver tables use three required `uint8_t[storage_channel_count][bucket_count]` arrays and one optional `uint16_t[storage_channel_count][bucket_count]` output-Q16 array:
 
 ```text
-solverValueLUT       channel_count x bucket_count x 1 byte
-solverValueFloorLUT  channel_count x bucket_count x 1 byte
-solverBFILUT         channel_count x bucket_count x 1 byte
+solverValueLUT       storage_channel_count x bucket_count x 1 byte
+solverValueFloorLUT  storage_channel_count x bucket_count x 1 byte
+solverBFILUT         storage_channel_count x bucket_count x 1 byte
+solverOutputQ16LUT   storage_channel_count x bucket_count x 2 bytes  (optional)
 ```
 
-So the solver table cost is:
+`storage_channel_count` depends on solver LUT mode:
+
+- **Per-channel mode (default):** `storage_channel_count = logical solver channel count`.
+- **Shared mode (opt-in):** `storage_channel_count = 1`, and `precompute()` computes exactly one LUT set reused by every logical channel.
+
+So the required solver table cost is:
 
 ```text
-RGB solver_bytes  = bucket_count x 3 channels x 3 tables = bucket_count x 9 bytes
-RGBW solver_bytes = bucket_count x 4 channels x 3 tables = bucket_count x 12 bytes
+solver_bytes = bucket_count x storage_channel_count x 3 bytes
+solver_bytes_with_output_q16 = bucket_count x storage_channel_count x 5 bytes
 ```
 
-If matching Q16 transfer curves are also kept at the same bucket count, assume one `uint16_t` transfer curve per channel:
+Transfer curves are now a separate storage choice. Runtime defaults to one shared `uint16_t[bucket_count]` transfer curve for all channels. Legacy per-channel transfer curves remain available:
 
 ```text
-RGB transfer_bytes  = bucket_count x 3 channels x 2 bytes = bucket_count x 6 bytes
-RGBW transfer_bytes = bucket_count x 4 channels x 2 bytes = bucket_count x 8 bytes
-
-RGB solver_plus_transfer_bytes  = bucket_count x 15 bytes
-RGBW solver_plus_transfer_bytes = bucket_count x 20 bytes
+shared_transfer_bytes = bucket_count x 2 bytes
+legacy_transfer_bytes = bucket_count x logical_channel_count x 2 bytes
 ```
 
 These estimates describe storage only. Tables may live in RAM, DMAMEM, or flash/PROGMEM depending on the target and how the firmware is generated. If the tables are in PROGMEM, they primarily consume flash rather than runtime RAM.
 
-| Solver buckets | RGB solver only | RGB + matching transfer | RGBW solver only | RGBW + matching transfer |
+Required solver tables plus the default shared transfer curve:
+
+| Solver buckets | Shared solver + shared transfer | RGB per-channel + shared transfer | RGBW / emulated RGBWW + shared transfer | Native RGBWW/RGBCCT + shared transfer |
 |---:|---:|---:|---:|---:|
-| 0 | 0 B (0.0 KiB) | 0 B (0.0 KiB) | 0 B (0.0 KiB) | 0 B (0.0 KiB) |
-| 256 | 2,304 B (2.2 KiB) | 3,840 B (3.8 KiB) | 3,072 B (3.0 KiB) | 5,120 B (5.0 KiB) |
-| 512 | 4,608 B (4.5 KiB) | 7,680 B (7.5 KiB) | 6,144 B (6.0 KiB) | 10,240 B (10.0 KiB) |
-| 1,024 | 9,216 B (9.0 KiB) | 15,360 B (15.0 KiB) | 12,288 B (12.0 KiB) | 20,480 B (20.0 KiB) |
-| 2,048 | 18,432 B (18.0 KiB) | 30,720 B (30.0 KiB) | 24,576 B (24.0 KiB) | 40,960 B (40.0 KiB) |
-| 4,096 | 36,864 B (36.0 KiB) | 61,440 B (60.0 KiB) | 49,152 B (48.0 KiB) | 81,920 B (80.0 KiB) |
-| 8,192 | 73,728 B (72.0 KiB) | 122,880 B (120.0 KiB) | 98,304 B (96.0 KiB) | 163,840 B (160.0 KiB) |
-| 16,384 | 147,456 B (144.0 KiB) | 245,760 B (240.0 KiB) | 196,608 B (192.0 KiB) | 327,680 B (320.0 KiB) |
-| 32,767 | 294,903 B (288.0 KiB) | 491,505 B (480.0 KiB) | 393,204 B (384.0 KiB) | 655,340 B (640.0 KiB) |
-| 65,535 | 589,815 B (576.0 KiB) | 983,025 B (960.0 KiB) | 786,420 B (768.0 KiB) | 1,310,700 B (1,280.0 KiB) |
+| 256 | 1,280 B (1.2 KiB) | 2,816 B (2.8 KiB) | 3,584 B (3.5 KiB) | 4,352 B (4.2 KiB) |
+| 512 | 2,560 B (2.5 KiB) | 5,632 B (5.5 KiB) | 7,168 B (7.0 KiB) | 8,704 B (8.5 KiB) |
+| 1,024 | 5,120 B (5.0 KiB) | 11,264 B (11.0 KiB) | 14,336 B (14.0 KiB) | 17,408 B (17.0 KiB) |
+| 2,048 | 10,240 B (10.0 KiB) | 22,528 B (22.0 KiB) | 28,672 B (28.0 KiB) | 34,816 B (34.0 KiB) |
+| 4,096 | 20,480 B (20.0 KiB) | 45,056 B (44.0 KiB) | 57,344 B (56.0 KiB) | 69,632 B (68.0 KiB) |
+| 8,192 | 40,960 B (40.0 KiB) | 90,112 B (88.0 KiB) | 114,688 B (112.0 KiB) | 139,264 B (136.0 KiB) |
+| 16,384 | 81,920 B (80.0 KiB) | 180,224 B (176.0 KiB) | 229,376 B (224.0 KiB) | 278,528 B (272.0 KiB) |
+
+For comparison, legacy per-channel transfer curves add `bucket_count x logical_channel_count x 2 bytes` instead of the default `bucket_count x 2 bytes`. Optional `solverOutputQ16LUT` adds `bucket_count x storage_channel_count x 2 bytes`.
+
+RGBWW/RGBCCT cost depends on fifth-channel solve mode:
+
+- **Emulated fifth channel:** W2 reuses W behavior, so solver LUT storage can remain RGBW-like if only four solver channels are precomputed/loaded.
+- **Native fifth channel:** W2/CCT gets its own solver LUT storage in per-channel mode, increasing required solver storage from four to five channels.
+- **Shared solver LUT mode:** RGB, RGBW, and RGBWW/RGBCCT all use one storage channel, but output accuracy becomes approximate unless the physical channels truly match the shared model.
 
 #### 6.5.1 Per-Pixel Render Buffers
 
@@ -372,6 +382,18 @@ BFI map, packed    2 bytes/pixel  (two bytes hold four 4-bit BFI values)
 
 RGB upper/lower solves cost 6 bytes per pixel before BFI storage. RGBW upper/lower solves cost 8 bytes per pixel. Normal BFI maps add one byte per active channel; packed BFI maps use 2 bytes per pixel in both RGB and RGBW modes.
 
+For RGBWW/RGBCCT-style 5-channel output, the same pattern extends to five logical channels:
+
+```text
+upperFrameBuffer   5 bytes/pixel  (G,R,B,W1,W2 upper values)
+lowerFrameBuffer   5 bytes/pixel  (G,R,B,W1,W2 floor values)
+displayBuffer      5 bytes/pixel  (active 5-channel frame sent to LED backend)
+BFI maps, normal   5 bytes/pixel  (one uint8_t map per logical channel)
+BFI map, packed    3 bytes/pixel  (ceil(5 / 2) bytes hold five 4-bit BFI values)
+```
+
+Emulated RGBWW/RGBCCT can have RGBW-like solver LUT cost, but render buffers still carry five output channels when the physical LED layout has five emitters.
+
 RGB buffer groups:
 
 | Buffer group | Normal BFI maps | Packed BFI map |
@@ -389,6 +411,15 @@ RGBW buffer groups:
 | BFI storage only | 4 bytes/pixel | 2 bytes/pixel |
 | Upper + lower + BFI storage | 12 bytes/pixel | 10 bytes/pixel |
 | Upper + lower + BFI + display buffer | 16 bytes/pixel | 14 bytes/pixel |
+
+RGBWW/RGBCCT buffer groups:
+
+| Buffer group | Normal BFI maps | Packed BFI map |
+|---|---:|---:|
+| Upper + lower solve buffers only | 10 bytes/pixel | 10 bytes/pixel |
+| BFI storage only | 5 bytes/pixel | 3 bytes/pixel |
+| Upper + lower + BFI storage | 15 bytes/pixel | 13 bytes/pixel |
+| Upper + lower + BFI + display buffer | 20 bytes/pixel | 18 bytes/pixel |
 
 Example RGB render-buffer costs:
 
@@ -408,19 +439,28 @@ Example RGBW render-buffer costs:
 | 2,400 | 19,200 B | 9,600 B | 4,800 B | 28,800 B | 24,000 B | 38,400 B | 33,600 B |
 | 3,000 | 24,000 B | 12,000 B | 6,000 B | 36,000 B | 30,000 B | 48,000 B | 42,000 B |
 
-The packed BFI representation cuts RGBW BFI-map storage in half, from 4 bytes/pixel to 2 bytes/pixel. For RGB-only output it reduces BFI-map storage from 3 bytes/pixel to 2 bytes/pixel. It does not reduce the upper/lower solve buffers or the active display buffer.
+Example RGBWW/RGBCCT render-buffer costs:
+
+| Pixels | Upper + lower | Normal BFI maps | Packed BFI map | Upper/lower + normal BFI | Upper/lower + packed BFI | With display, normal BFI | With display, packed BFI |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 96 | 960 B | 480 B | 288 B | 1,440 B | 1,248 B | 1,920 B | 1,728 B |
+| 1,200 | 12,000 B | 6,000 B | 3,600 B | 18,000 B | 15,600 B | 24,000 B | 21,600 B |
+| 2,400 | 24,000 B | 12,000 B | 7,200 B | 36,000 B | 31,200 B | 48,000 B | 43,200 B |
+| 3,000 | 30,000 B | 15,000 B | 9,000 B | 45,000 B | 39,000 B | 60,000 B | 54,000 B |
+
+The packed BFI representation cuts RGBW BFI-map storage in half, from 4 bytes/pixel to 2 bytes/pixel. For RGB-only output it reduces BFI-map storage from 3 bytes/pixel to 2 bytes/pixel. For RGBWW/RGBCCT it stores five logical BFI values in 3 bytes/pixel. It does not reduce the upper/lower solve buffers or the active display buffer.
 
 #### 6.5.2 Practical Memory Targets
 
-For low-memory MCUs, the first large lever is the solver bucket count. The second is whether transfer curves are stored at full solver resolution or at a smaller independent resolution. A 4,096-bucket RGB solver is 36 KiB for the three runtime solver tables, or 60 KiB if matching Q16 transfer curves are also resident. A 4,096-bucket RGBW solver is 48 KiB / 80 KiB. At 16,384 buckets those become 144 KiB / 240 KiB for RGB and 192 KiB / 320 KiB for RGBW before render buffers.
+For low-memory MCUs, the first large lever is the solver bucket count. The second is solver LUT storage mode. The third is whether transfer curves use the default shared curve or legacy per-channel curves. With the current default shared transfer curve, a 4,096-bucket RGB solver is about 44 KiB, RGBW/emulated-RGBWW is about 56 KiB, native RGBWW/RGBCCT is about 68 KiB, and shared solver LUT mode is about 20 KiB before render buffers. At 16,384 buckets those become about 176 KiB, 224 KiB, 272 KiB, and 80 KiB respectively.
 
 For RAM-constrained targets, likely minimum viable profiles are:
 
 | Target class | Suggested solver buckets | Transfer strategy | BFI map strategy | Notes |
 |---|---:|---|---|---|
-| Very small MCU | 256-1,024 | Use 256-entry or flash-resident curves | Packed | Lowest RAM target; coarser True16 solve. |
-| Midrange MCU | 2,048-4,096 | Match buckets only if RAM allows | Packed preferred | Good first target for ESP32-class RAM budgets. |
-| Teensy 4.x RAM1/RAM2 split | 4,096-8,192 | Keep large tables in DMAMEM/PROGMEM where possible | Normal or packed | Enough room for calibration experiments, but table placement matters. |
+| Very small MCU | 256-1,024 | Shared transfer curve; consider shared solver LUT | Packed | Lowest RAM target; approximate shared-solver output may be acceptable for bringup. |
+| Midrange MCU | 2,048-4,096 | Shared transfer curve; per-channel solver when RAM allows | Packed preferred | Good first target for ESP32-class RAM budgets. |
+| Teensy 4.x RAM1/RAM2 split | 4,096-8,192 | Shared transfer default; legacy per-channel only when calibrated need justifies it | Normal or packed | Enough room for calibration experiments, but table placement matters. |
 | High-memory / flash-table target | 16,384+ | Prefer PROGMEM/generated headers | Packed for large pixel counts | High solver precision; not suitable as pure RAM tables on small MCUs. |
 
 Additional memory not included above: stack, serial/USB buffers, LED backend DMA/internal buffers, 3D cube LUTs, calibration profiles, UDP/network buffers on ESP-class devices, and any capture/debug telemetry retained at runtime.

@@ -15,6 +15,10 @@
 #include <TemporalBFI.h>
 #include <TemporalBFIRuntime.h>
 
+// Verification sketch for RGB, RGBW, and RGBWW/RGBCCT colorimetric paths.
+// ObjectFLED currently emits 4-channel RGBW only; RGBWW/RGBCCT requests are
+// rejected until native 5-channel output lands. W2 is never folded into W.
+
 #define NUM_PINS 2
 #define LEDS_PER_PIN 48
 #define LED_COUNT (NUM_PINS * LEDS_PER_PIN)
@@ -46,8 +50,15 @@
 #define OP_SET_FILL16 0x2B
 #define OP_SET_ANALYTICAL_RGB16 0x2C
 #define OP_GET_DIODE_PROFILE 0x2D
+#define OP_SET_OUTPUT_MODE 0x2E
+#define OP_SET_ANALYTICAL_RGBW16 0x2F
+#define OP_SET_ANALYTICAL_RGBWW16 0x30
+#define OP_SET_DIODE_PROFILE 0x31
 #define PHASE_MODE_AUTO 0x00
 #define PHASE_MODE_MANUAL 0x01
+#define OUTPUT_MODE_RGB 0x00
+#define OUTPUT_MODE_RGBW 0x01
+#define OUTPUT_MODE_RGBWW 0x02
 #define ANALYTICAL_MODEL_SUB_GAMUT 0x00
 #define ANALYTICAL_MODEL_LP_LEGACY 0x01
 #define DUAL_EDGE_POLICY_Y_CORRECT_CLIP 0x00
@@ -61,6 +72,8 @@
 #define STATUS_BAD_PAYLOAD 0x01
 #define STATUS_BAD_OPCODE 0x02
 #define STATUS_SOLVE_FAILED 0x03
+#define STATUS_UNSUPPORTED_OUTPUT_MODE 0x04
+#define STATUS_BAD_PROFILE 0x05
 
 const uint8_t ledPins[NUM_PINS] = {5, 21};
 
@@ -74,6 +87,7 @@ DMAMEM uint8_t bfiMapW[LED_COUNT] = {0};
 bool renderEnabled = true;
 bool manualPhaseMode = false;
 bool solverEnabled = false;
+uint8_t outputMode = OUTPUT_MODE_RGBW;
 uint8_t analyticalModel = ANALYTICAL_MODEL_SUB_GAMUT;
 uint8_t analyticalSolvePath = ANALYTICAL_SOLVE_NONE;
 uint8_t analyticalDualEdgePolicy = DUAL_EDGE_POLICY_Y_CORRECT_CLIP;
@@ -89,23 +103,46 @@ DMAMEM uint8_t solverValueLUT[4][SOLVER_LUT_SIZE] = {0};
 DMAMEM uint8_t solverValueFloorLUT[4][SOLVER_LUT_SIZE] = {0};
 
 TemporalBFI::SolverRuntime solver;
+static constexpr TemporalBFI::RenderOptions RENDER_OPTIONS = {
+  TemporalBFI::LedColorOrder::GRBW,
+  TemporalBFI::BfiMapStorageMode::Separate,
+};
 fl::colorimetric_detail::ProfileCache analyticalCache;
 
+/*r 0.688374 0.311626 145.777378
+g 0.143812 0.743976 593.537679
+b 0.128786 0.067607 137.122935
+w 0.328928 0.355226 1598.947861*/
+
 static constexpr float DIODE_PROFILE_XY[4][2] = {
-  {0.6872f, 0.3127f},  // R
-  {0.1425f, 0.7452f},  // G
-  {0.1287f, 0.0673f},  // B
-  {0.3299f, 0.3570f},  // W
+  {0.688374f, 0.311626f},  // R
+  {0.143812f, 0.743976f},  // G
+  {0.128786f, 0.067607f},  // B
+  {0.328928f, 0.355226f},  // W
 };
-static constexpr float DIODE_PROFILE_WHITE_Y = 1497.336789f;
+static constexpr float DIODE_PROFILE_WHITE_Y = 1598.947861f;
 static constexpr float DIODE_PROFILE_REL_Y[4] = {
-  145.950592f / DIODE_PROFILE_WHITE_Y,
-  552.601306f / DIODE_PROFILE_WHITE_Y,
-  128.05f / DIODE_PROFILE_WHITE_Y,
+  145.777378f / DIODE_PROFILE_WHITE_Y,
+  593.537679f / DIODE_PROFILE_WHITE_Y,
+  137.122935f / DIODE_PROFILE_WHITE_Y,
   1.0f,
 };
 
-const fl::DiodeProfile testBenchRgbwProfile = {
+float activeDiodeProfileXY[4][2] = {
+  {DIODE_PROFILE_XY[0][0], DIODE_PROFILE_XY[0][1]},
+  {DIODE_PROFILE_XY[1][0], DIODE_PROFILE_XY[1][1]},
+  {DIODE_PROFILE_XY[2][0], DIODE_PROFILE_XY[2][1]},
+  {DIODE_PROFILE_XY[3][0], DIODE_PROFILE_XY[3][1]},
+};
+
+float activeDiodeProfileRelY[4] = {
+  DIODE_PROFILE_REL_Y[0],
+  DIODE_PROFILE_REL_Y[1],
+  DIODE_PROFILE_REL_Y[2],
+  DIODE_PROFILE_REL_Y[3],
+};
+
+fl::DiodeProfile testBenchRgbwProfile = {
   {DIODE_PROFILE_XY[0][0], DIODE_PROFILE_XY[0][1]},
   {DIODE_PROFILE_XY[1][0], DIODE_PROFILE_XY[1][1]},
   {DIODE_PROFILE_XY[2][0], DIODE_PROFILE_XY[2][1]},
@@ -120,10 +157,13 @@ const fl::DiodeProfile testBenchRgbwProfile = {
 uint16_t lastInputR16 = 0;
 uint16_t lastInputG16 = 0;
 uint16_t lastInputB16 = 0;
+uint16_t lastInputW16 = 0;
+uint16_t lastInputW2_16 = 0;
 uint16_t lastSolvedR16 = 0;
 uint16_t lastSolvedG16 = 0;
 uint16_t lastSolvedB16 = 0;
 uint16_t lastSolvedW16 = 0;
+uint16_t lastSolvedW2_16 = 0;
 uint8_t lastStrictOk = 0;
 uint16_t lastStrictR16 = 0;
 uint16_t lastStrictG16 = 0;
@@ -160,7 +200,30 @@ struct RGBW16Tuple {
   uint16_t g;
   uint16_t b;
   uint16_t w;
+  uint16_t w2;
 };
+
+static inline uint8_t activeLogicalChannels() {
+  return (outputMode == OUTPUT_MODE_RGB) ? 3 : (outputMode == OUTPUT_MODE_RGBWW ? 5 : 4);
+}
+
+static inline uint8_t objectFledOutputChannels() {
+  return 4;
+}
+
+static inline uint8_t supportedOutputModeMask() {
+  return 0x03;  // RGB | RGBW on current ObjectFLED target
+}
+
+static inline bool outputModeSupported(uint8_t mode) {
+  return mode == OUTPUT_MODE_RGB || mode == OUTPUT_MODE_RGBW;
+}
+
+static inline bool setOutputMode(uint8_t mode) {
+  if (!outputModeSupported(mode)) return false;
+  outputMode = mode;
+  return true;
+}
 
 static inline uint8_t clampU8(int value) {
   if (value < 0) return 0;
@@ -199,6 +262,8 @@ fl::RgbwColorimetricDualEdgePolicy fastLedDualEdgePolicy(uint8_t policy) {
       return fl::RgbwColorimetricDualEdgePolicy::YCorrectClip;
   }
 }
+
+static void clearAnalyticalDebug();
 
 void resetParser() {
   parser.state = DirectFrameState::SYNC0;
@@ -247,10 +312,71 @@ static inline void writeU32BE(uint8_t* payload, uint8_t offset, uint32_t value) 
   payload[offset + 3] = value & 0xFF;
 }
 
+static inline uint32_t readU32BE(const uint8_t* payload, uint8_t offset) {
+  return ((uint32_t)payload[offset] << 24) |
+         ((uint32_t)payload[offset + 1] << 16) |
+         ((uint32_t)payload[offset + 2] << 8) |
+         (uint32_t)payload[offset + 3];
+}
+
 static inline uint32_t q1e6FromFloat(float value) {
   if (!(value > 0.0f)) return 0u;
   if (value > 4000.0f) value = 4000.0f;
   return (uint32_t)(value * 1000000.0f + 0.5f);
+}
+
+static inline float floatFromQ1e6(uint32_t value) {
+  return (float)value * 0.000001f;
+}
+
+static void rebuildDiodeProfileCache() {
+  testBenchRgbwProfile = fl::DiodeProfile{
+    {activeDiodeProfileXY[0][0], activeDiodeProfileXY[0][1]},
+    {activeDiodeProfileXY[1][0], activeDiodeProfileXY[1][1]},
+    {activeDiodeProfileXY[2][0], activeDiodeProfileXY[2][1]},
+    {activeDiodeProfileXY[3][0], activeDiodeProfileXY[3][1]},
+    activeDiodeProfileRelY[0],
+    activeDiodeProfileRelY[1],
+    activeDiodeProfileRelY[2],
+    activeDiodeProfileRelY[3],
+    0,
+  };
+  fl::set_input_gamut(&testBenchRgbwProfile, fl::InputGamut::Native);
+  fl::set_rgbw_colorimetric_profile(&testBenchRgbwProfile);
+  fl::colorimetric_detail::build_profile_cache(&testBenchRgbwProfile, &analyticalCache);
+}
+
+static bool setDiodeProfileFromPayload(const uint8_t* payload, uint16_t payloadLen) {
+  // Payload after opcode:
+  // ['D','P','R','F',version=1,format=1, 12x u32be q1e6]
+  // Channel order is R,G,B,W; each channel stores x, y, relative_Y.
+  if (payloadLen < 55) return false;
+  if (payload[1] != 'D' || payload[2] != 'P' || payload[3] != 'R' || payload[4] != 'F') return false;
+  if (payload[5] != 1 || payload[6] != 1) return false;
+
+  float xy[4][2];
+  float relY[4];
+  uint8_t offset = 7;
+  for (uint8_t i = 0; i < 4; ++i) {
+    xy[i][0] = floatFromQ1e6(readU32BE(payload, offset)); offset += 4;
+    xy[i][1] = floatFromQ1e6(readU32BE(payload, offset)); offset += 4;
+    relY[i] = floatFromQ1e6(readU32BE(payload, offset)); offset += 4;
+
+    if (!(xy[i][0] > 0.0f) || !(xy[i][0] < 1.0f)) return false;
+    if (!(xy[i][1] > 0.0f) || !(xy[i][1] < 1.0f)) return false;
+    if ((xy[i][0] + xy[i][1]) >= 1.0f) return false;
+    if (!(relY[i] > 0.0f)) return false;
+  }
+
+  for (uint8_t i = 0; i < 4; ++i) {
+    activeDiodeProfileXY[i][0] = xy[i][0];
+    activeDiodeProfileXY[i][1] = xy[i][1];
+    activeDiodeProfileRelY[i] = relY[i];
+  }
+
+  rebuildDiodeProfileCache();
+  clearAnalyticalDebug();
+  return true;
 }
 
 void sendDiodeProfileResponse(uint8_t op, uint8_t status) {
@@ -266,17 +392,23 @@ void sendDiodeProfileResponse(uint8_t op, uint8_t status) {
   payload[5] = 'F';
   payload[6] = 1;  // version
   payload[7] = 1;  // format: uint32 big-endian values scaled by 1e6
-  uint8_t offset = 8;
-  for (uint8_t i = 0; i < 4; ++i) {
-    writeU32BE(payload, offset, q1e6FromFloat(DIODE_PROFILE_XY[i][0])); offset += 4;
-    writeU32BE(payload, offset, q1e6FromFloat(DIODE_PROFILE_XY[i][1])); offset += 4;
-    writeU32BE(payload, offset, q1e6FromFloat(DIODE_PROFILE_REL_Y[i])); offset += 4;
-  }
+  writeU32BE(payload, 8, q1e6FromFloat(activeDiodeProfileXY[0][0]));
+  writeU32BE(payload, 12, q1e6FromFloat(activeDiodeProfileXY[0][1]));
+  writeU32BE(payload, 16, q1e6FromFloat(activeDiodeProfileRelY[0]));
+  writeU32BE(payload, 20, q1e6FromFloat(activeDiodeProfileXY[1][0]));
+  writeU32BE(payload, 24, q1e6FromFloat(activeDiodeProfileXY[1][1]));
+  writeU32BE(payload, 28, q1e6FromFloat(activeDiodeProfileRelY[1]));
+  writeU32BE(payload, 32, q1e6FromFloat(activeDiodeProfileXY[2][0]));
+  writeU32BE(payload, 36, q1e6FromFloat(activeDiodeProfileXY[2][1]));
+  writeU32BE(payload, 40, q1e6FromFloat(activeDiodeProfileRelY[2]));
+  writeU32BE(payload, 44, q1e6FromFloat(activeDiodeProfileXY[3][0]));
+  writeU32BE(payload, 48, q1e6FromFloat(activeDiodeProfileXY[3][1]));
+  writeU32BE(payload, 52, q1e6FromFloat(activeDiodeProfileRelY[3]));
   sendFrame(FRAME_KIND_CAL_RSP, payload, sizeof(payload));
 }
 
 void sendCalResponse(uint8_t op, uint8_t status) {
-  uint8_t payload[52];
+  uint8_t payload[64] = {0};
   payload[0] = op;
   payload[1] = status;
   payload[2] = renderEnabled ? 1 : 0;
@@ -314,10 +446,19 @@ void sendCalResponse(uint8_t op, uint8_t status) {
   writeU16BE(payload, 47, lastLpB16);
   writeU16BE(payload, 49, lastLpW16);
   payload[51] = analyticalDualEdgePolicy;
+  payload[52] = outputMode;
+  payload[53] = supportedOutputModeMask();
+  payload[54] = objectFledOutputChannels();
+  payload[55] = activeLogicalChannels();
+  writeU16BE(payload, 56, lastInputW16);
+  writeU16BE(payload, 58, lastInputW2_16);
+  writeU16BE(payload, 60, lastSolvedW2_16);
+  payload[62] = 0;  // unsupported modes are rejected, not folded
+  payload[63] = 1;  // response extension version
   sendFrame(FRAME_KIND_CAL_RSP, payload, sizeof(payload));
 }
 
-void clearAnalyticalDebug() {
+static void clearAnalyticalDebug() {
   lastStrictOk = 0;
   lastStrictR16 = 0;
   lastStrictG16 = 0;
@@ -341,10 +482,13 @@ void clearAll() {
   lastInputR16 = 0;
   lastInputG16 = 0;
   lastInputB16 = 0;
+  lastInputW16 = 0;
+  lastInputW2_16 = 0;
   lastSolvedR16 = 0;
   lastSolvedG16 = 0;
   lastSolvedB16 = 0;
   lastSolvedW16 = 0;
+  lastSolvedW2_16 = 0;
   clearAnalyticalDebug();
   normalizeTemporalTick();
 }
@@ -368,15 +512,25 @@ void fillAll(uint8_t r, uint8_t g, uint8_t b, uint8_t w, uint8_t bfiR, uint8_t b
   lastInputR16 = (uint16_t)r * 257u;
   lastInputG16 = (uint16_t)g * 257u;
   lastInputB16 = (uint16_t)b * 257u;
+  lastInputW16 = (uint16_t)w * 257u;
+  lastInputW2_16 = 0;
   lastSolvedR16 = (uint16_t)r * 257u;
   lastSolvedG16 = (uint16_t)g * 257u;
   lastSolvedB16 = (uint16_t)b * 257u;
   lastSolvedW16 = (uint16_t)w * 257u;
+  lastSolvedW2_16 = 0;
   clearAnalyticalDebug();
   normalizeTemporalTick();
 }
 
-void applySolvedRGBW16(uint16_t r16, uint16_t g16, uint16_t b16, uint16_t w16) {
+bool applySolvedOutput16(uint16_t r16, uint16_t g16, uint16_t b16, uint16_t w16, uint16_t w2_16) {
+  if (!outputModeSupported(outputMode)) return false;
+  if (w2_16 != 0) return false;
+  if (outputMode == OUTPUT_MODE_RGB) {
+    if (w16 != 0) return false;
+    w16 = 0;
+  }
+
   const auto gState = solveTrue16State(g16, 0);
   const auto rState = solveTrue16State(r16, 1);
   const auto bState = solveTrue16State(b16, 2);
@@ -402,15 +556,23 @@ void applySolvedRGBW16(uint16_t r16, uint16_t g16, uint16_t b16, uint16_t w16) {
   lastSolvedG16 = g16;
   lastSolvedB16 = b16;
   lastSolvedW16 = w16;
+  lastSolvedW2_16 = w2_16;
   normalizeTemporalTick();
+  return true;
 }
 
-void fillAll16(uint16_t r16, uint16_t g16, uint16_t b16, uint16_t w16) {
+bool applySolvedRGBW16(uint16_t r16, uint16_t g16, uint16_t b16, uint16_t w16) {
+  return applySolvedOutput16(r16, g16, b16, w16, 0);
+}
+
+bool fillAll16(uint16_t r16, uint16_t g16, uint16_t b16, uint16_t w16) {
   lastInputR16 = r16;
   lastInputG16 = g16;
   lastInputB16 = b16;
+  lastInputW16 = w16;
+  lastInputW2_16 = 0;
   clearAnalyticalDebug();
-  applySolvedRGBW16(r16, g16, b16, w16);
+  return applySolvedOutput16(r16, g16, b16, w16, 0);
 }
 
 bool solveAnalyticalRGB16(uint16_t r16, uint16_t g16, uint16_t b16,
@@ -439,14 +601,14 @@ bool solveAnalyticalRGB16(uint16_t r16, uint16_t g16, uint16_t b16,
 
   if (model == ANALYTICAL_MODEL_LP_LEGACY) {
     analyticalSolvePath = ANALYTICAL_SOLVE_LP_LEGACY;
-    solved = {lastLpR16, lastLpG16, lastLpB16, lastLpW16};
+    solved = {lastLpR16, lastLpG16, lastLpB16, lastLpW16, 0};
   } else if (!lastStrictOk) {
     analyticalSolvePath = ANALYTICAL_SOLVE_STRICT_FAILED;
-    solved = {0, 0, 0, 0};
+    solved = {0, 0, 0, 0, 0};
     return false;
   } else {
     analyticalSolvePath = ANALYTICAL_SOLVE_STRICT_SUB_GAMUT;
-    solved = {lastStrictR16, lastStrictG16, lastStrictB16, lastStrictW16};
+    solved = {lastStrictR16, lastStrictG16, lastStrictB16, lastStrictW16, 0};
   }
   return true;
 }
@@ -457,12 +619,37 @@ bool fillAnalyticalRGB16(uint16_t r16, uint16_t g16, uint16_t b16,
   lastInputR16 = r16;
   lastInputG16 = g16;
   lastInputB16 = b16;
+  lastInputW16 = 0;
+  lastInputW2_16 = 0;
   RGBW16Tuple solved;
   if (!solveAnalyticalRGB16(r16, g16, b16, analyticalModel, dualEdgePolicy, solved)) {
     return false;
   }
-  applySolvedRGBW16(solved.r, solved.g, solved.b, solved.w);
-  return true;
+  if (outputMode == OUTPUT_MODE_RGB) {
+    return applySolvedOutput16(r16, g16, b16, 0, 0);
+  }
+  return applySolvedOutput16(solved.r, solved.g, solved.b, solved.w, 0);
+}
+
+bool fillAnalyticalRGBW16(uint16_t r16, uint16_t g16, uint16_t b16, uint16_t w16) {
+  if (outputMode != OUTPUT_MODE_RGBW) return false;
+  lastInputR16 = r16;
+  lastInputG16 = g16;
+  lastInputB16 = b16;
+  lastInputW16 = w16;
+  lastInputW2_16 = 0;
+  clearAnalyticalDebug();
+  return applySolvedOutput16(r16, g16, b16, w16, 0);
+}
+
+bool fillAnalyticalRGBWW16(uint16_t r16, uint16_t g16, uint16_t b16, uint16_t w1_16, uint16_t w2_16) {
+  lastInputR16 = r16;
+  lastInputG16 = g16;
+  lastInputB16 = b16;
+  lastInputW16 = w1_16;
+  lastInputW2_16 = w2_16;
+  clearAnalyticalDebug();
+  return false;
 }
 
 void setTemporalBlend(
@@ -497,20 +684,30 @@ void setTemporalBlend(
   lastInputR16 = (uint16_t)upperR * 257u;
   lastInputG16 = (uint16_t)upperG * 257u;
   lastInputB16 = (uint16_t)upperB * 257u;
+  lastInputW16 = (uint16_t)upperW * 257u;
+  lastInputW2_16 = 0;
   lastSolvedR16 = (uint16_t)upperR * 257u;
   lastSolvedG16 = (uint16_t)upperG * 257u;
   lastSolvedB16 = (uint16_t)upperB * 257u;
   lastSolvedW16 = (uint16_t)upperW * 257u;
+  lastSolvedW2_16 = 0;
   clearAnalyticalDebug();
   normalizeTemporalTick();
 }
 
 void renderIndependentSubpixelBFI() {
   const uint8_t phase = (uint8_t)(temporalTick % (uint32_t)TEMPORAL_BFI_CYCLE);
-  TemporalBFI::SolverRuntime::renderSubpixelBFI_RGBW(
+  TemporalBFI::BfiMapView bfiMaps;
+  bfiMaps.bfiMapG = bfiMapG;
+  bfiMaps.bfiMapR = bfiMapR;
+  bfiMaps.bfiMapB = bfiMapB;
+  bfiMaps.bfiMapW1 = bfiMapW;
+
+  TemporalBFI::SolverRuntime::renderLoopStatic(
       upperFrameBuffer, lowerFrameBuffer,
-      bfiMapG, bfiMapR, bfiMapB, bfiMapW,
-      displayBuffer, LED_COUNT, phase);
+      bfiMaps,
+      displayBuffer, LED_COUNT, phase,
+      RENDER_OPTIONS);
 }
 
 uint16_t readU16(const uint8_t* payload, uint8_t offset) {
@@ -572,17 +769,36 @@ void handleCalFrame(const uint8_t* payload, uint16_t payloadLen) {
       if (payloadLen < 2) status = STATUS_BAD_PAYLOAD;
       else solverEnabled = payload[1] ? true : false;
       break;
+    case OP_SET_OUTPUT_MODE:
+      if (payloadLen < 2) status = STATUS_BAD_PAYLOAD;
+      else if (!setOutputMode(payload[1])) status = STATUS_UNSUPPORTED_OUTPUT_MODE;
+      break;
     case OP_SET_FILL16:
       if (payloadLen < 9) status = STATUS_BAD_PAYLOAD;
-      else fillAll16(readU16(payload, 1), readU16(payload, 3), readU16(payload, 5), readU16(payload, 7));
+      else if (!fillAll16(readU16(payload, 1), readU16(payload, 3), readU16(payload, 5), readU16(payload, 7))) status = STATUS_UNSUPPORTED_OUTPUT_MODE;
       break;
     case OP_SET_ANALYTICAL_RGB16:
       if (payloadLen < 8) status = STATUS_BAD_PAYLOAD;
       else if (!fillAnalyticalRGB16(readU16(payload, 2), readU16(payload, 4), readU16(payload, 6), payload[1], payloadLen >= 9 ? payload[8] : DUAL_EDGE_POLICY_Y_CORRECT_CLIP)) status = STATUS_SOLVE_FAILED;
       break;
+    case OP_SET_ANALYTICAL_RGBW16:
+      if (payloadLen < 9) status = STATUS_BAD_PAYLOAD;
+      else if (!fillAnalyticalRGBW16(readU16(payload, 1), readU16(payload, 3), readU16(payload, 5), readU16(payload, 7))) status = STATUS_UNSUPPORTED_OUTPUT_MODE;
+      break;
+    case OP_SET_ANALYTICAL_RGBWW16:
+      if (payloadLen < 11) status = STATUS_BAD_PAYLOAD;
+      else if (!fillAnalyticalRGBWW16(readU16(payload, 1), readU16(payload, 3), readU16(payload, 5), readU16(payload, 7), readU16(payload, 9))) status = STATUS_UNSUPPORTED_OUTPUT_MODE;
+      break;
     case OP_GET_DIODE_PROFILE:
       sendDiodeProfileResponse(op, STATUS_OK);
       return;
+    case OP_SET_DIODE_PROFILE:
+      if (!setDiodeProfileFromPayload(payload, payloadLen)) status = STATUS_BAD_PROFILE;
+      else {
+        sendDiodeProfileResponse(op, STATUS_OK);
+        return;
+      }
+      break;
     case OP_COMMIT:
       break;
     default:
@@ -667,24 +883,23 @@ void setup() {
   leds.begin(1.4, 100);
   leds.setBrightness(255);
 
-  float d65xy[2] = {0.3127f, 0.3290f};
-  fl::set_input_gamut(&testBenchRgbwProfile, fl::InputGamut::Native);
-  fl::set_rgbw_colorimetric_profile(&testBenchRgbwProfile);
+  rebuildDiodeProfileCache();
   fl::set_rgbw_colorimetric_dual_edge_policy(fastLedDualEdgePolicy(analyticalDualEdgePolicy));
-  fl::colorimetric_detail::build_profile_cache(&testBenchRgbwProfile, &analyticalCache);
 
   auto& cfg = solver.config();
   cfg.maxBFI = MAX_BFI_FRAMES;
   cfg.relativeErrorDivisor = 24;
   cfg.minErrorQ16 = 64;
   cfg.enableInputQ16Calibration = false;
+  solver.setLedColorOrder(RENDER_OPTIONS.colorOrder);
+  solver.setSolverLUTMode(TemporalBFI::SolverLUTMode::PerChannel);
 
   solver.attachLUTs(&solverValueLUT[0][0], &solverBFILUT[0][0],
                     &solverValueFloorLUT[0][0], nullptr, SOLVER_LUT_SIZE);
 
   sendLog("Generating precomputed true16 solver LUT...");
 
-  solver.precompute(TemporalTrue16BFIPolicySolver::encodeStateFrom16);
+  solver.precompute(TemporalTrue16BFIPolicySolver::encodeStateFrom16, 4);
 
   sendLog("Precomputed true16 solver LUT ready.");
 
