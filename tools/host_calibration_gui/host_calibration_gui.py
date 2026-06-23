@@ -24,7 +24,7 @@ import serial.tools.list_ports
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-APP_TITLE = "Temporal RGBW Calibration Host v7.5.6"
+APP_TITLE = "Temporal RGBW Calibration Host v7.6.0"
 DEFAULT_SERIAL_BAUD = 30000000
 DEFAULT_ARTIFACT_DIR = Path(__file__).resolve().parent / "captures"
 FRAME_HEADER = b"TCAL"
@@ -160,31 +160,21 @@ MAX_BLEND_CYCLE_LENGTH = 60
 PHASE_CONTROL_MAX = MAX_BLEND_CYCLE_LENGTH - 1
 
 GENERIC_PLAN_FIELDS = [
-    "name",
-    "mode",
-    "repeats",
-    "r",
-    "g",
-    "b",
-    "w",
-    "lower_r",
-    "lower_g",
-    "lower_b",
-    "lower_w",
-    "upper_r",
-    "upper_g",
-    "upper_b",
-    "upper_w",
-    "r16",
-    "g16",
-    "b16",
-    "w16",
-    "bfi_r",
-    "bfi_g",
-    "bfi_b",
-    "bfi_w",
+    "name", "mode", "channels", "repeats",
+    "r", "g", "b", "w", "w1", "w2",
+    "lower_r", "lower_g", "lower_b", "lower_w", "lower_w1", "lower_w2",
+    "upper_r", "upper_g", "upper_b", "upper_w", "upper_w1", "upper_w2",
+    "r16", "g16", "b16", "w16", "w1_16", "w2_16",
+    "bfi_r", "bfi_g", "bfi_b", "bfi_w", "bfi_w1", "bfi_w2",
     "use_fill16",
 ]
+
+PLAN_CHANNEL_LABELS = {
+    3: "RGB",
+    4: "RGBW",
+    5: "RGBWW/RGBCCT",
+}
+
 
 # ---------------------------------------------------------------------------
 # Argyll spotread presets / measurement protocol
@@ -926,20 +916,26 @@ class MeasurementPlanRow:
     bfi_b: int
     bfi_w: int
     repeats: int
+    w2: int = 0
+    bfi_w2: int = 0
     lower_r: int = 0
     lower_g: int = 0
     lower_b: int = 0
     lower_w: int = 0
+    lower_w2: int = 0
     upper_r: int = 0
     upper_g: int = 0
     upper_b: int = 0
     upper_w: int = 0
+    upper_w2: int = 0
     r16: int = 0
     g16: int = 0
     b16: int = 0
     w16: int = 0
+    w2_16: int = 0
     use_fill16: bool = False
     mode: str = "fill8"
+    channels: int = 4
 
     def normalized_mode(self) -> str:
         if self.mode == "blend8":
@@ -948,10 +944,32 @@ class MeasurementPlanRow:
             return "fill16"
         return "fill8"
 
+    def channel_count(self) -> int:
+        try:
+            count = int(self.channels)
+        except Exception:
+            count = 0
+        if count in (3, 4, 5):
+            return count
+        if any(int(v) != 0 for v in (self.w2, self.bfi_w2, self.lower_w2, self.upper_w2, self.w2_16)):
+            return 5
+        if any(int(v) != 0 for v in (self.w, self.bfi_w, self.lower_w, self.upper_w, self.w16)):
+            return 4
+        return 3
+
+    def channel_label(self) -> str:
+        return PLAN_CHANNEL_LABELS.get(self.channel_count(), f"{self.channel_count()}ch")
+
     def to_dict(self) -> dict[str, object]:
         data = asdict(self)
         data["mode"] = self.normalized_mode()
+        data["channels"] = self.channel_count()
         data["use_fill16"] = int(self.normalized_mode() == "fill16")
+        data["w1"] = self.w
+        data["lower_w1"] = self.lower_w
+        data["upper_w1"] = self.upper_w
+        data["w1_16"] = self.w16
+        data["bfi_w1"] = self.bfi_w
         return data
 
 
@@ -1702,12 +1720,12 @@ class App:
 
     def _make_int_scale(self, parent, label, variable, maxv, length=220):
         row = ttk.Frame(parent)
-        row.pack(fill="x", padx=8, pady=2)
-        ttk.Label(row, text=label, width=8).pack(side="left")
+        row.pack(fill="x", padx=6, pady=1)
+        ttk.Label(row, text=label, width=7).pack(side="left")
         scale = tk.Scale(row, from_=0, to=maxv, variable=variable, orient="horizontal", resolution=1, showvalue=False, command=lambda _v: self._round_var(variable))
         scale.configure(length=length)
         scale.pack(side="left", fill="x", expand=True)
-        ttk.Entry(row, textvariable=variable, width=8).pack(side="left", padx=4)
+        ttk.Entry(row, textvariable=variable, width=6).pack(side="left", padx=3)
 
     def _round_var(self, var):
         try:
@@ -1725,21 +1743,24 @@ class App:
         self.g_var = tk.IntVar(value=0)
         self.b_var = tk.IntVar(value=0)
         self.w_var = tk.IntVar(value=0)
+        self.w2_var = tk.IntVar(value=0)
         self.lower_r_var = tk.IntVar(value=0)
         self.lower_g_var = tk.IntVar(value=0)
         self.lower_b_var = tk.IntVar(value=0)
         self.lower_w_var = tk.IntVar(value=0)
+        self.lower_w2_var = tk.IntVar(value=0)
         self.r16_var = tk.IntVar(value=0)
         self.g16_var = tk.IntVar(value=0)
         self.b16_var = tk.IntVar(value=0)
         self.w16_var = tk.IntVar(value=0)
-        # W2 is only used by the Phase-8 RGBWW/RGBCCT direct-output opcode.
-        # It is intentionally not folded into W on the host side.
+        # W2 is only used by RGBWW/RGBCCT output paths and is intentionally
+        # not folded into W on the host side.
         self.w2_16_var = getattr(self, "w2_16_var", tk.IntVar(value=0))
         self.bfi_r_var = tk.IntVar(value=0)
         self.bfi_g_var = tk.IntVar(value=0)
         self.bfi_b_var = tk.IntVar(value=0)
         self.bfi_w_var = tk.IntVar(value=0)
+        self.bfi_w2_var = tk.IntVar(value=0)
 
         mode_row = ttk.Frame(box)
         mode_row.pack(fill="x", padx=8, pady=(6, 2))
@@ -1748,77 +1769,97 @@ class App:
         ttk.Radiobutton(mode_row, text="Blend8", variable=self.manual_mode_var, value="blend8", command=self._on_manual_mode_changed).pack(side="left", padx=6)
         ttk.Radiobutton(mode_row, text="Fill16", variable=self.manual_mode_var, value="fill16", command=self._on_manual_mode_changed).pack(side="left", padx=6)
 
+        summary = ttk.Frame(box)
+        summary.pack(fill="x", padx=8, pady=(2, 4))
+        swatches = ttk.Frame(summary)
+        swatches.pack(side="left", anchor="n")
+        ttk.Label(swatches, text="U").pack(side="left")
+        self.preview_canvas = tk.Canvas(swatches, width=58, height=28, bg="#000000", highlightthickness=1, highlightbackground="#999")
+        self.preview_canvas.pack(side="left", padx=(2, 8))
+        ttk.Label(swatches, text="L").pack(side="left")
+        self.lower_preview_canvas = tk.Canvas(swatches, width=58, height=28, bg="#000000", highlightthickness=1, highlightbackground="#999")
+        self.lower_preview_canvas.pack(side="left", padx=(2, 0))
+        text_box = ttk.Frame(summary)
+        text_box.pack(side="left", fill="both", expand=True, padx=(10, 0))
+        self.status_text = tk.StringVar(value="status: idle")
+        ttk.Label(text_box, textvariable=self.status_text).pack(anchor="w")
+        self.measurement_text = tk.StringVar(value="last measurement: none")
+        ttk.Label(text_box, textvariable=self.measurement_text, wraplength=190, justify="left").pack(anchor="w")
+        self.preview_text = tk.StringVar(value="Preview RGB")
+        ttk.Label(text_box, textvariable=self.preview_text, wraplength=190, justify="left").pack(anchor="w")
+
+        phase_box = ttk.Frame(box)
+        phase_box.pack(fill="x", padx=8, pady=(2, 4))
+        phase_mode_row = ttk.Frame(phase_box)
+        phase_mode_row.pack(fill="x")
+        ttk.Label(phase_mode_row, text="Phase mode").pack(side="left")
+        ttk.Radiobutton(phase_mode_row, text="Auto", variable=self.phase_mode_var, value=PHASE_MODE_AUTO, command=self.send_phase_mode).pack(side="left", padx=4)
+        ttk.Radiobutton(phase_mode_row, text="Manual", variable=self.phase_mode_var, value=PHASE_MODE_MANUAL, command=self.send_phase_mode).pack(side="left", padx=4)
+
+        phase_index_row = ttk.Frame(phase_box)
+        phase_index_row.pack(fill="x", pady=(1, 0))
+        ttk.Label(phase_index_row, text="Phase index").pack(side="left")
+        tk.Scale(phase_index_row, from_=0, to=PHASE_CONTROL_MAX, variable=self.phase_var, orient="horizontal", resolution=1, showvalue=False, command=lambda _v: self._round_var(self.phase_var)).pack(side="left", fill="x", expand=True, padx=4)
+        ttk.Entry(phase_index_row, textvariable=self.phase_var, width=6).pack(side="left", padx=4)
+        ttk.Button(phase_index_row, text="Apply", command=self.send_phase).pack(side="left", padx=4)
+
+        btns = ttk.Frame(box)
+        btns.pack(fill="x", padx=8, pady=(4, 1))
+        ttk.Button(btns, text="Send State", command=self.send_fill).pack(side="left", padx=3)
+        ttk.Button(btns, text="Commit", command=self.commit).pack(side="left", padx=3)
+        ttk.Button(btns, text="Clear", command=self.clear).pack(side="left", padx=3)
+        ttk.Button(btns, text="Measure Once", command=self.measure_once).pack(side="left", padx=3)
+
+        direct_btns = ttk.Frame(box)
+        direct_btns.pack(fill="x", padx=8, pady=(0, 4))
+        ttk.Button(direct_btns, text="Direct RGBW16", command=self.send_direct_rgbw16).pack(side="left", padx=3)
+        ttk.Button(direct_btns, text="Direct RGBWW16", command=self.send_direct_rgbww16).pack(side="left", padx=3)
+
         tabs = ttk.Notebook(box)
-        tabs.pack(fill="x", padx=8, pady=4)
+        tabs.pack(fill="x", padx=8, pady=(0, 4))
         base_tab = ttk.Frame(tabs)
         true16_tab = ttk.Frame(tabs)
         tabs.add(base_tab, text="8-bit / Blend8")
         tabs.add(true16_tab, text="True16")
+        self.manual_tabs = tabs
+        self.base_tab = base_tab
+        self.true16_tab = true16_tab
 
-        for label, var, maxv in [("R", self.r_var, 255), ("G", self.g_var, 255), ("B", self.b_var, 255), ("W", self.w_var, 255)]:
-            self._make_int_scale(base_tab, label, var, maxv, length=180)
+        for label, var, maxv in [("R", self.r_var, 255), ("G", self.g_var, 255), ("B", self.b_var, 255), ("W", self.w_var, 255), ("W2", self.w2_var, 255)]:
+            self._make_int_scale(base_tab, label, var, maxv, length=150)
 
-        blend8 = ttk.LabelFrame(base_tab, text="Blend8 lower / previous value")
-        blend8.pack(fill="x", padx=8, pady=6)
-        for label, var in [("Floor R", self.lower_r_var), ("Floor G", self.lower_g_var), ("Floor B", self.lower_b_var), ("Floor W", self.lower_w_var)]:
-            self._make_int_scale(blend8, label, var, 255, length=180)
+        blend_extra = ttk.Notebook(base_tab)
+        blend_extra.pack(fill="x", padx=6, pady=(4, 2))
+        self.blend8_extra_tabs = blend_extra
+        lower_tab = ttk.Frame(blend_extra)
+        bfi_tab = ttk.Frame(blend_extra)
+        blend_extra.add(lower_tab, text="Lower / previous")
+        blend_extra.add(bfi_tab, text="BFI")
 
-        bfi_box = ttk.LabelFrame(base_tab, text="BFI insertion counts")
-        bfi_box.pack(fill="x", padx=8, pady=6)
-        for label, var, maxv in [("BFI R", self.bfi_r_var, MAX_BFI), ("BFI G", self.bfi_g_var, MAX_BFI), ("BFI B", self.bfi_b_var, MAX_BFI), ("BFI W", self.bfi_w_var, MAX_BFI)]:
-            self._make_int_scale(bfi_box, label, var, maxv, length=180)
+        blend8 = ttk.Frame(lower_tab)
+        blend8.pack(fill="x", padx=2, pady=2)
+        self.blend8_lower_box = blend8
+        for label, var in [("Floor R", self.lower_r_var), ("Floor G", self.lower_g_var), ("Floor B", self.lower_b_var), ("Floor W", self.lower_w_var), ("Floor W2", self.lower_w2_var)]:
+            self._make_int_scale(blend8, label, var, 255, length=130)
+
+        bfi_box = ttk.Frame(bfi_tab)
+        bfi_box.pack(fill="x", padx=2, pady=2)
+        self.blend8_bfi_box = bfi_box
+        for label, var, maxv in [("BFI R", self.bfi_r_var, MAX_BFI), ("BFI G", self.bfi_g_var, MAX_BFI), ("BFI B", self.bfi_b_var, MAX_BFI), ("BFI W", self.bfi_w_var, MAX_BFI), ("BFI W2", self.bfi_w2_var, MAX_BFI)]:
+            self._make_int_scale(bfi_box, label, var, maxv, length=130)
 
         fill16 = ttk.LabelFrame(true16_tab, text="True 16-bit patch values")
-        fill16.pack(fill="x", padx=8, pady=6)
+        fill16.pack(fill="x", padx=6, pady=(4, 2))
         for txt, var in [("R16", self.r16_var), ("G16", self.g16_var), ("B16", self.b16_var), ("W16", self.w16_var), ("W2 16", self.w2_16_var)]:
             row = ttk.Frame(fill16)
-            row.pack(fill="x", padx=4, pady=2)
-            ttk.Label(row, text=txt, width=8).pack(side="left")
+            row.pack(fill="x", padx=4, pady=1)
+            ttk.Label(row, text=txt, width=7).pack(side="left")
             scale = tk.Scale(row, from_=0, to=65535, variable=var, orient="horizontal", resolution=1, showvalue=False, command=lambda _v: self._sync_preview_from_16())
-            scale.configure(length=180)
+            scale.configure(length=140)
             scale.pack(side="left", fill="x", expand=True)
-            ttk.Entry(row, textvariable=var, width=10).pack(side="left", padx=4)
+            ttk.Entry(row, textvariable=var, width=8).pack(side="left", padx=3)
 
-        phase_box = ttk.Frame(box)
-        phase_box.pack(fill="x", padx=8, pady=6)
-        ttk.Label(phase_box, text="Phase mode").pack(side="left")
-        ttk.Radiobutton(phase_box, text="Auto", variable=self.phase_mode_var, value=PHASE_MODE_AUTO, command=self.send_phase_mode).pack(side="left", padx=4)
-        ttk.Radiobutton(phase_box, text="Manual", variable=self.phase_mode_var, value=PHASE_MODE_MANUAL, command=self.send_phase_mode).pack(side="left", padx=4)
-        ttk.Label(phase_box, text="Phase index").pack(side="left", padx=(16, 4))
-        tk.Scale(phase_box, from_=0, to=PHASE_CONTROL_MAX, variable=self.phase_var, orient="horizontal", resolution=1, showvalue=False, command=lambda _v: self._round_var(self.phase_var)).pack(side="left", fill="x", expand=True)
-        ttk.Entry(phase_box, textvariable=self.phase_var, width=8).pack(side="left", padx=4)
-        ttk.Button(phase_box, text="Apply phase", command=self.send_phase).pack(side="left", padx=4)
-
-        btns = ttk.Frame(box)
-        btns.pack(fill="x", padx=8, pady=8)
-        ttk.Button(btns, text="Send State", command=self.send_fill).pack(side="left", padx=4)
-        ttk.Button(btns, text="Temporal Fill16 (Direct RGBW16)", command=self.send_direct_rgbw16).pack(side="left", padx=4)
-        ttk.Button(btns, text="Temporal Direct RGBWW16", command=self.send_direct_rgbww16).pack(side="left", padx=4)
-        ttk.Button(btns, text="Commit", command=self.commit).pack(side="left", padx=4)
-        ttk.Button(btns, text="Clear", command=self.clear).pack(side="left", padx=4)
-        ttk.Button(btns, text="Measure Once", command=self.measure_once).pack(side="left", padx=12)
-
-        pv = ttk.Frame(box)
-        pv.pack(fill="x", padx=8, pady=8)
-        current_box = ttk.Frame(pv)
-        current_box.pack(side="left")
-        ttk.Label(current_box, text="Upper / current").pack(anchor="w")
-        self.preview_canvas = tk.Canvas(current_box, width=90, height=48, bg="#000000", highlightthickness=1, highlightbackground="#999")
-        self.preview_canvas.pack(side="left")
-        lower_box = ttk.Frame(pv)
-        lower_box.pack(side="left", padx=(12, 0))
-        ttk.Label(lower_box, text="Lower / previous").pack(anchor="w")
-        self.lower_preview_canvas = tk.Canvas(lower_box, width=90, height=48, bg="#000000", highlightthickness=1, highlightbackground="#999")
-        self.lower_preview_canvas.pack(side="left")
-        self.preview_text = tk.StringVar(value="Preview RGB")
-        ttk.Label(pv, textvariable=self.preview_text).pack(side="left", padx=12)
-
-        status = ttk.Frame(box)
-        status.pack(fill="x", padx=8, pady=6)
-        self.status_text = tk.StringVar(value="status: idle")
-        ttk.Label(status, textvariable=self.status_text).pack(side="left")
-        self.measurement_text = tk.StringVar(value="last measurement: none")
-        ttk.Label(status, textvariable=self.measurement_text).pack(side="left", padx=16)
+        self._update_manual_control_visibility(select_tab=True)
         self.update_preview()
 
     def build_log_panel(self, parent):
@@ -1840,16 +1881,16 @@ class App:
         ttk.Button(toolbar, text="Pause/Resume", command=self.toggle_pause_plan).pack(side="left", padx=4)
         ttk.Button(toolbar, text="Stop", command=self.stop_plan).pack(side="left", padx=4)
         ttk.Button(toolbar, text="Save plan CSV", command=self.save_plan_csv).pack(side="left", padx=4)
-        cols = ("name", "mode", "rgbw", "rgbw16", "bfi", "lower", "upper", "timing", "repeats")
+        cols = ("name", "mode", "family", "values8", "values16", "bfi", "lower", "upper", "timing", "repeats")
         tree_frame = ttk.Frame(box)
         tree_frame.pack(fill="both", expand=True, padx=6, pady=6)
         tree_frame.columnconfigure(0, weight=1)
         tree_frame.rowconfigure(0, weight=1)
         self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=16, selectmode="extended")
-        widths = {"name": 200, "mode": 78, "rgbw": 110, "rgbw16": 180, "bfi": 90, "lower": 130, "upper": 130, "timing": 100, "repeats": 60}
+        widths = {"name": 200, "mode": 78, "family": 110, "values8": 140, "values16": 220, "bfi": 120, "lower": 150, "upper": 150, "timing": 120, "repeats": 60}
         for col in cols:
             self.tree.heading(col, text=col)
-            self.tree.column(col, width=widths.get(col, 70), stretch=(col in {"name", "rgbw16", "lower", "upper"}), anchor="center")
+            self.tree.column(col, width=widths.get(col, 70), stretch=(col in {"name", "values16", "lower", "upper"}), anchor="center")
         self.tree.column("name", anchor="w")
         self.tree.bind("<<TreeviewSelect>>", self.on_plan_selection)
 
@@ -1935,10 +1976,11 @@ class App:
 
     def _plan_capture_header(self) -> list[str]:
         return [
-            "name", "mode", "use_fill16", "r", "g", "b", "w",
-            "lower_r", "lower_g", "lower_b", "lower_w",
-            "upper_r", "upper_g", "upper_b", "upper_w",
-            "r16", "g16", "b16", "w16", "bfi_r", "bfi_g", "bfi_b", "bfi_w",
+            "name", "mode", "channels", "use_fill16", "r", "g", "b", "w", "w2",
+            "lower_r", "lower_g", "lower_b", "lower_w", "lower_w2",
+            "upper_r", "upper_g", "upper_b", "upper_w", "upper_w2",
+            "r16", "g16", "b16", "w16", "w2_16",
+            "bfi_r", "bfi_g", "bfi_b", "bfi_w", "bfi_w2",
             "repeat_index", "solver_mode", "measurement_format", "spotread_command",
             "ok", "returncode", "elapsed_s", "timed_out",
             "XYZ_X", "XYZ_Y", "XYZ_Z", "xyY_Y", "xyY_x", "xyY_y",
@@ -1948,10 +1990,11 @@ class App:
 
     def _plan_capture_row(self, row: MeasurementPlanRow, rep: int, solver_mode: int, result: dict[str, object]) -> list[object]:
         return [
-            row.name, row.normalized_mode(), int(row.normalized_mode() == "fill16"), row.r, row.g, row.b, row.w,
-            row.lower_r, row.lower_g, row.lower_b, row.lower_w,
-            row.upper_r, row.upper_g, row.upper_b, row.upper_w,
-            row.r16, row.g16, row.b16, row.w16, row.bfi_r, row.bfi_g, row.bfi_b, row.bfi_w,
+            row.name, row.normalized_mode(), row.channel_count(), int(row.normalized_mode() == "fill16"), row.r, row.g, row.b, row.w, row.w2,
+            row.lower_r, row.lower_g, row.lower_b, row.lower_w, row.lower_w2,
+            row.upper_r, row.upper_g, row.upper_b, row.upper_w, row.upper_w2,
+            row.r16, row.g16, row.b16, row.w16, row.w2_16,
+            row.bfi_r, row.bfi_g, row.bfi_b, row.bfi_w, row.bfi_w2,
             rep, solver_mode, result.get("measurement_format"), result.get("command_string"),
             result.get("ok"), result.get("returncode"), result.get("elapsed_s"), result.get("timed_out"),
             self._measurement_value(result, "XYZ.X"), self._measurement_value(result, "XYZ.Y"), self._measurement_value(result, "XYZ.Z"),
@@ -2192,29 +2235,72 @@ class App:
         except Exception as exc:
             messagebox.showerror("Connect failed", str(exc))
 
+    def _update_manual_control_visibility(self, *, select_tab: bool = False) -> None:
+        """Keep the manual panel compact by selecting the mode-relevant tab."""
+        mode = self.manual_mode_var.get()
+        if select_tab and hasattr(self, "manual_tabs"):
+            try:
+                self.manual_tabs.select(self.true16_tab if mode == "fill16" else self.base_tab)
+            except Exception:
+                pass
+        if hasattr(self, "blend8_extra_tabs"):
+            try:
+                self.blend8_extra_tabs.select(0 if mode == "blend8" else 1)
+            except Exception:
+                pass
+
     def _on_manual_mode_changed(self):
         self.use_fill16_var.set(self.manual_mode_var.get() == "fill16")
+        self._update_manual_control_visibility(select_tab=True)
         self.update_preview()
 
-    def set_preview_values(self, r, g, b, w, bfi_r, bfi_g, bfi_b, bfi_w, r16=None, g16=None, b16=None, w16=None, mode="fill8", lower_r=0, lower_g=0, lower_b=0, lower_w=0):
+    def set_preview_values(
+        self,
+        r,
+        g,
+        b,
+        w,
+        bfi_r,
+        bfi_g,
+        bfi_b,
+        bfi_w,
+        r16=None,
+        g16=None,
+        b16=None,
+        w16=None,
+        w2_16=None,
+        mode="fill8",
+        lower_r=0,
+        lower_g=0,
+        lower_b=0,
+        lower_w=0,
+        w2=0,
+        lower_w2=0,
+        bfi_w2=0,
+    ):
         self.manual_mode_var.set(mode)
         self.use_fill16_var.set(mode == "fill16")
         self.r_var.set(int(r))
         self.g_var.set(int(g))
         self.b_var.set(int(b))
         self.w_var.set(int(w))
+        self.w2_var.set(int(w2))
         self.lower_r_var.set(int(lower_r))
         self.lower_g_var.set(int(lower_g))
         self.lower_b_var.set(int(lower_b))
         self.lower_w_var.set(int(lower_w))
+        self.lower_w2_var.set(int(lower_w2))
         self.r16_var.set(int(r16) if r16 is not None else int(r) * 257)
         self.g16_var.set(int(g16) if g16 is not None else int(g) * 257)
         self.b16_var.set(int(b16) if b16 is not None else int(b) * 257)
         self.w16_var.set(int(w16) if w16 is not None else int(w) * 257)
+        self.w2_16_var.set(int(w2_16) if w2_16 is not None else int(w2) * 257)
         self.bfi_r_var.set(int(bfi_r))
         self.bfi_g_var.set(int(bfi_g))
         self.bfi_b_var.set(int(bfi_b))
         self.bfi_w_var.set(int(bfi_w))
+        self.bfi_w2_var.set(int(bfi_w2))
+        self._update_manual_control_visibility(select_tab=True)
         self.update_preview()
 
     def _sync_preview_from_16(self):
@@ -2222,13 +2308,15 @@ class App:
         self.g_var.set(int((self.g16_var.get() * 255 + 32767) // 65535))
         self.b_var.set(int((self.b16_var.get() * 255 + 32767) // 65535))
         self.w_var.set(int((self.w16_var.get() * 255 + 32767) // 65535))
+        self.w2_var.set(int((self.w2_16_var.get() * 255 + 32767) // 65535))
         self.update_preview()
 
     @staticmethod
-    def _preview_rgb_with_white(r, g, b, w):
-        r8 = max(0, min(255, int(r) + int(w)))
-        g8 = max(0, min(255, int(g) + int(w)))
-        b8 = max(0, min(255, int(b) + int(w)))
+    def _preview_rgb_with_white(r, g, b, w, w2=0):
+        white = int(w) + int(w2)
+        r8 = max(0, min(255, int(r) + white))
+        g8 = max(0, min(255, int(g) + white))
+        b8 = max(0, min(255, int(b) + white))
         return r8, g8, b8
 
     def update_preview(self):
@@ -2236,25 +2324,35 @@ class App:
         g = int(self.g_var.get())
         b = int(self.b_var.get())
         w = int(self.w_var.get())
+        w2 = int(self.w2_var.get())
         lower_r = int(self.lower_r_var.get())
         lower_g = int(self.lower_g_var.get())
         lower_b = int(self.lower_b_var.get())
         lower_w = int(self.lower_w_var.get())
+        lower_w2 = int(self.lower_w2_var.get())
         mode = self.manual_mode_var.get()
-        preview_r, preview_g, preview_b = self._preview_rgb_with_white(r, g, b, w)
-        lower_preview_r, lower_preview_g, lower_preview_b = self._preview_rgb_with_white(lower_r, lower_g, lower_b, lower_w)
+        preview_r, preview_g, preview_b = self._preview_rgb_with_white(r, g, b, w, w2)
+        lower_preview_r, lower_preview_g, lower_preview_b = self._preview_rgb_with_white(lower_r, lower_g, lower_b, lower_w, lower_w2)
         self.preview_canvas.configure(bg=f"#{preview_r:02x}{preview_g:02x}{preview_b:02x}")
         self.lower_preview_canvas.configure(bg=f"#{lower_preview_r:02x}{lower_preview_g:02x}{lower_preview_b:02x}")
         if mode == "blend8":
-            self.preview_text.set(f"BLEND8 upper=({r},{g},{b},{self.w_var.get()}) lower=({self.lower_r_var.get()},{self.lower_g_var.get()},{self.lower_b_var.get()},{self.lower_w_var.get()}) BFI=({self.bfi_r_var.get()},{self.bfi_g_var.get()},{self.bfi_b_var.get()},{self.bfi_w_var.get()})")
+            self.preview_text.set(
+                f"BLEND8 U=({r},{g},{b},{w},{w2}) L=({lower_r},{lower_g},{lower_b},{lower_w},{lower_w2}) "
+                f"BFI=({self.bfi_r_var.get()},{self.bfi_g_var.get()},{self.bfi_b_var.get()},"
+                f"{self.bfi_w_var.get()},{self.bfi_w2_var.get()})"
+            )
         elif mode == "fill16":
             self.preview_text.set(
-                f"FILL16 RGBW16=({self.r16_var.get()},{self.g16_var.get()},"
-                f"{self.b16_var.get()},{self.w16_var.get()}) W2={self.w2_16_var.get()} "
-                f"RGBW8=({r},{g},{b},{self.w_var.get()})"
+                f"FILL16 16=({self.r16_var.get()},{self.g16_var.get()},"
+                f"{self.b16_var.get()},{self.w16_var.get()},{self.w2_16_var.get()}) "
+                f"8=({r},{g},{b},{w},{w2})"
             )
         else:
-            self.preview_text.set(f"FILL8 RGBW=({r},{g},{b},{self.w_var.get()}) BFI=({self.bfi_r_var.get()},{self.bfi_g_var.get()},{self.bfi_b_var.get()},{self.bfi_w_var.get()})")
+            self.preview_text.set(
+                f"FILL8=({r},{g},{b},{w},{w2}) BFI=({self.bfi_r_var.get()},"
+                f"{self.bfi_g_var.get()},{self.bfi_b_var.get()},{self.bfi_w_var.get()},"
+                f"{self.bfi_w2_var.get()})"
+            )
 
     def send_hello(self):
         self.device.send_frame(KIND_HELLO_REQ, b"")
@@ -2279,49 +2377,107 @@ class App:
 
     def _build_fill_payload(self, row: MeasurementPlanRow | None = None) -> bytes:
         if row is None:
-            mode = self.manual_mode_var.get()
-            if mode == "blend8":
-                return self._build_blend8_payload(self._build_manual_row())
-            if mode == "fill16":
-                payload = bytearray([OP_SET_FILL16])
-                for value in [self.r16_var.get(), self.g16_var.get(), self.b16_var.get(), self.w16_var.get()]:
-                    payload.extend(self._pack_u16(value))
-                return bytes(payload)
-            return bytes([OP_SET_FILL, self.r_var.get() & 0xFF, self.g_var.get() & 0xFF, self.b_var.get() & 0xFF, self.w_var.get() & 0xFF, self.bfi_r_var.get() & 0xFF, self.bfi_g_var.get() & 0xFF, self.bfi_b_var.get() & 0xFF, self.bfi_w_var.get() & 0xFF])
+            row = self._build_manual_row()
+        target_channels = self._selected_device_channel_count()
+        row_channels = row.channel_count()
+        if row_channels > target_channels:
+            raise RuntimeError(
+                f"row {row.name!r} is {self._channel_label(row_channels)}, "
+                f"but selected device output mode is {self._channel_label(target_channels)}"
+            )
         mode = row.normalized_mode()
         if mode == "blend8":
-            return self._build_blend8_payload(row)
+            return self._build_blend8_payload(row, output_channels=target_channels)
         if mode == "fill16":
-            payload = bytearray([OP_SET_FILL16])
-            for value in [row.r16, row.g16, row.b16, row.w16]:
-                payload.extend(self._pack_u16(value))
-            return bytes(payload)
-        return bytes([OP_SET_FILL, row.r & 0xFF, row.g & 0xFF, row.b & 0xFF, row.w & 0xFF, row.bfi_r & 0xFF, row.bfi_g & 0xFF, row.bfi_b & 0xFF, row.bfi_w & 0xFF])
+            values = self._row_u16_channels(row, output_channels=target_channels)
+            if target_channels >= 5:
+                return self._build_direct_rgbww16_payload(values)
+            return self._build_fill16_payload(values)
+        return self._build_fill8_payload(row, output_channels=target_channels)
 
-    def _build_blend8_payload(self, row: MeasurementPlanRow) -> bytes:
-        return bytes([
-            OP_SET_TEMPORAL_BLEND,
-            row.lower_r & 0xFF,
-            row.lower_g & 0xFF,
-            row.lower_b & 0xFF,
-            row.lower_w & 0xFF,
-            row.upper_r & 0xFF,
-            row.upper_g & 0xFF,
-            row.upper_b & 0xFF,
-            row.upper_w & 0xFF,
-            row.bfi_r & 0xFF,
-            row.bfi_g & 0xFF,
-            row.bfi_b & 0xFF,
-            row.bfi_w & 0xFF,
-        ])
+    def _row_u8_channels(
+        self,
+        row: MeasurementPlanRow,
+        *,
+        upper: bool = False,
+        lower: bool = False,
+        output_channels: int | None = None,
+    ) -> list[int]:
+        row_count = row.channel_count()
+        out_count = output_channels or row_count
+        if out_count < row_count:
+            raise RuntimeError(
+                f"row {row.name!r} is {self._channel_label(row_count)}, "
+                f"but requested payload is {self._channel_label(out_count)}"
+            )
+        if lower:
+            channels = [row.lower_r, row.lower_g, row.lower_b]
+            w1 = row.lower_w if row_count >= 4 else 0
+            w2 = row.lower_w2 if row_count >= 5 else 0
+        elif upper:
+            channels = [row.upper_r, row.upper_g, row.upper_b]
+            w1 = row.upper_w if row_count >= 4 else 0
+            w2 = row.upper_w2 if row_count >= 5 else 0
+        else:
+            channels = [row.r, row.g, row.b]
+            w1 = row.w if row_count >= 4 else 0
+            w2 = row.w2 if row_count >= 5 else 0
+        if out_count >= 4:
+            channels.append(w1)
+        if out_count >= 5:
+            channels.append(w2)
+        return [max(0, min(255, int(v))) for v in channels]
 
-    def _build_fill16_payload(self, values: list[int] | tuple[int, int, int, int]) -> bytes:
+    def _row_bfi_channels(self, row: MeasurementPlanRow, *, output_channels: int | None = None) -> list[int]:
+        row_count = row.channel_count()
+        out_count = output_channels or row_count
+        if out_count < row_count:
+            raise RuntimeError(
+                f"row {row.name!r} is {self._channel_label(row_count)}, "
+                f"but requested BFI payload is {self._channel_label(out_count)}"
+            )
+        channels = [row.bfi_r, row.bfi_g, row.bfi_b]
+        if out_count >= 4:
+            channels.append(row.bfi_w if row_count >= 4 else 0)
+        if out_count >= 5:
+            channels.append(row.bfi_w2 if row_count >= 5 else 0)
+        return [max(0, min(MAX_BLEND_CYCLE_LENGTH - 1, int(v))) for v in channels]
+
+    def _row_u16_channels(self, row: MeasurementPlanRow, *, output_channels: int | None = None) -> list[int]:
+        row_count = row.channel_count()
+        out_count = output_channels or row_count
+        if out_count < row_count:
+            raise RuntimeError(
+                f"row {row.name!r} is {self._channel_label(row_count)}, "
+                f"but requested Fill16 payload is {self._channel_label(out_count)}"
+            )
+        channels = [row.r16, row.g16, row.b16]
+        if out_count >= 4:
+            channels.append(row.w16 if row_count >= 4 else 0)
+        if out_count >= 5:
+            channels.append(row.w2_16 if row_count >= 5 else 0)
+        return [max(0, min(65535, int(v))) for v in channels]
+
+    def _build_fill8_payload(self, row: MeasurementPlanRow, *, output_channels: int | None = None) -> bytes:
+        out_count = output_channels or self._selected_device_channel_count()
+        channels = self._row_u8_channels(row, output_channels=out_count)
+        bfi = self._row_bfi_channels(row, output_channels=out_count)
+        return bytes([OP_SET_FILL, *channels, *bfi])
+
+    def _build_blend8_payload(self, row: MeasurementPlanRow, *, output_channels: int | None = None) -> bytes:
+        out_count = output_channels or self._selected_device_channel_count()
+        lower = self._row_u8_channels(row, lower=True, output_channels=out_count)
+        upper = self._row_u8_channels(row, upper=True, output_channels=out_count)
+        bfi = self._row_bfi_channels(row, output_channels=out_count)
+        return bytes([OP_SET_TEMPORAL_BLEND, *lower, *upper, *bfi])
+
+    def _build_fill16_payload(self, values: list[int] | tuple[int, ...]) -> bytes:
         payload = bytearray([OP_SET_FILL16])
         for value in values:
             payload.extend(self._pack_u16(value))
         return bytes(payload)
 
-    def _build_direct_rgbww16_payload(self, values: list[int] | tuple[int, int, int, int, int]) -> bytes:
+    def _build_direct_rgbww16_payload(self, values: list[int] | tuple[int, ...]) -> bytes:
         payload = bytearray([OP_SET_DIRECT_RGBWW16])
         for value in values:
             payload.extend(self._pack_u16(value))
@@ -2329,6 +2485,30 @@ class App:
 
     def _selected_strip_channel_count(self) -> int:
         return STRIP_TYPE_CHOICES.get(self._verifier_strip_type_var.get(), 4)
+
+    def _selected_device_channel_count(self) -> int:
+        mode_name = self._device_output_mode_var.get()
+        mode_id = OUTPUT_MODE_CHOICES.get(mode_name, OUTPUT_MODE_RGBW)
+        if mode_id == OUTPUT_MODE_RGB:
+            return 3
+        if mode_id == OUTPUT_MODE_RGBWW:
+            return 5
+        return 4
+
+    def _channel_label(self, count: int) -> str:
+        return PLAN_CHANNEL_LABELS.get(int(count), f"{count}ch")
+
+    def _validate_plan_row_compatible(self, row: MeasurementPlanRow, *, context: str = "plan") -> None:
+        target_channels = self._selected_device_channel_count()
+        row_channels = row.channel_count()
+        if row_channels > target_channels:
+            msg = (
+                f"[{context}] row {row.name!r} is {self._channel_label(row_channels)}, "
+                f"but selected device output mode is {self._channel_label(target_channels)}. "
+                "Select a device/strip mode with enough channels; the host will not drop W/W2 channels."
+            )
+            self.log_queue.put(msg)
+            raise RuntimeError(msg)
 
     def _selected_cube_output_channel_count(self) -> int:
         if self.verifier_lut is None or self.verifier_lut_channel_count is None:
@@ -2507,39 +2687,79 @@ class App:
         g = int(self.g_var.get())
         b = int(self.b_var.get())
         w = int(self.w_var.get())
+        w2 = int(self.w2_var.get())
+        lower_r = int(self.lower_r_var.get())
+        lower_g = int(self.lower_g_var.get())
+        lower_b = int(self.lower_b_var.get())
+        lower_w = int(self.lower_w_var.get())
+        lower_w2 = int(self.lower_w2_var.get())
+        bfi_r = int(self.bfi_r_var.get())
+        bfi_g = int(self.bfi_g_var.get())
+        bfi_b = int(self.bfi_b_var.get())
+        bfi_w = int(self.bfi_w_var.get())
+        bfi_w2 = int(self.bfi_w2_var.get())
+
         r16 = int(self.r16_var.get()) if mode == "fill16" else (r * 257)
         g16 = int(self.g16_var.get()) if mode == "fill16" else (g * 257)
         b16 = int(self.b16_var.get()) if mode == "fill16" else (b * 257)
         w16 = int(self.w16_var.get()) if mode == "fill16" else (w * 257)
+        w2_16 = int(self.w2_16_var.get()) if mode == "fill16" else (w2 * 257)
+
+        selected_channels = self._selected_device_channel_count()
+        required_channels = selected_channels
+        needs_w = any((w, lower_w if mode == "blend8" else 0, bfi_w, w16 if mode == "fill16" else 0))
+        needs_w2 = any((w2, lower_w2 if mode == "blend8" else 0, bfi_w2, w2_16 if mode == "fill16" else 0))
+        if needs_w2:
+            required_channels = max(required_channels, 5)
+        elif selected_channels == 3 and needs_w:
+            required_channels = 4
+
+        manual_w2 = self._q16_to_u8(w2_16) if mode == "fill16" else w2
+        manual_bfi_w2 = 0 if mode == "fill16" else bfi_w2
         return MeasurementPlanRow(
             name="manual",
             r=r,
             g=g,
             b=b,
-            w=w,
-            bfi_r=int(self.bfi_r_var.get()),
-            bfi_g=int(self.bfi_g_var.get()),
-            bfi_b=int(self.bfi_b_var.get()),
-            bfi_w=int(self.bfi_w_var.get()),
+            w=w if required_channels >= 4 else 0,
+            w2=manual_w2 if required_channels >= 5 else 0,
+            bfi_r=bfi_r,
+            bfi_g=bfi_g,
+            bfi_b=bfi_b,
+            bfi_w=bfi_w if required_channels >= 4 else 0,
+            bfi_w2=manual_bfi_w2 if required_channels >= 5 else 0,
             repeats=1,
-            lower_r=int(self.lower_r_var.get()),
-            lower_g=int(self.lower_g_var.get()),
-            lower_b=int(self.lower_b_var.get()),
-            lower_w=int(self.lower_w_var.get()),
+            lower_r=lower_r,
+            lower_g=lower_g,
+            lower_b=lower_b,
+            lower_w=lower_w if required_channels >= 4 else 0,
+            lower_w2=lower_w2 if required_channels >= 5 else 0,
             upper_r=r,
             upper_g=g,
             upper_b=b,
-            upper_w=w,
+            upper_w=w if required_channels >= 4 else 0,
+            upper_w2=manual_w2 if required_channels >= 5 else 0,
             r16=r16,
             g16=g16,
             b16=b16,
-            w16=w16,
+            w16=w16 if required_channels >= 4 else 0,
+            w2_16=w2_16 if required_channels >= 5 else 0,
             use_fill16=(mode == "fill16"),
             mode=mode,
+            channels=required_channels,
         )
 
-    def send_fill(self):
-        self.device.send_frame(KIND_CAL_REQ, self._build_fill_payload())
+    def send_fill(self, *, show_error: bool = True):
+        try:
+            row = self._build_manual_row()
+            self._validate_plan_row_compatible(row, context="manual")
+            self.device.send_frame(KIND_CAL_REQ, self._build_fill_payload(row))
+        except Exception as exc:
+            self.log_queue.put(f"[manual] render rejected: {exc}")
+            if show_error:
+                messagebox.showerror("Render rejected", str(exc))
+                return
+            raise
 
     def clear(self):
         self.device.send_frame(KIND_CAL_REQ, bytes([OP_CLEAR]))
@@ -2604,8 +2824,14 @@ class App:
                 return msg
         return None
 
-    def infer_repeats(self, r, g, b, w):
-        y = 0.2126 * (r / 255.0) + 0.7152 * (g / 255.0) + 0.0722 * (b / 255.0) + 1.0 * (w / 255.0)
+    def infer_repeats(self, r, g, b, w=0, w2=0):
+        y = (
+            0.2126 * (r / 255.0) +
+            0.7152 * (g / 255.0) +
+            0.0722 * (b / 255.0) +
+            1.0 * (w / 255.0) +
+            1.0 * (w2 / 255.0)
+        )
         if y > 0.5:
             return 1
         if y > 0.15:
@@ -2621,32 +2847,87 @@ class App:
     def _parse_bool(self, value):
         return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
+    def _canonical_record(self, rec: dict[str, object]) -> dict[str, object]:
+        return {str(k).strip().lower(): v for k, v in rec.items() if k is not None}
+
     def _normalize_mode(self, rec: dict[str, object]) -> str:
+        rec = self._canonical_record(rec)
         mode = str(rec.get("mode", "")).strip().lower()
         if mode and mode not in {"blend8", "fill16", "fill8"}:
             raise ValueError(f"unsupported mode '{mode}'")
         if mode in {"blend8", "fill16", "fill8"}:
             return mode
-        if any(str(rec.get(field, "")).strip() for field in ["lower_r", "upper_r", "lower_g", "upper_g", "lower_b", "upper_b", "lower_w", "upper_w"]):
+        blend_fields = [
+            "lower_r", "upper_r", "lower_g", "upper_g", "lower_b", "upper_b",
+            "lower_w", "upper_w", "lower_w1", "upper_w1", "lower_w2", "upper_w2",
+        ]
+        if any(str(rec.get(field, "")).strip() for field in blend_fields):
             return "blend8"
-        if self._parse_bool(rec.get("use_fill16", "0")):
+        fill16_fields = ["r16", "g16", "b16", "w16", "w1_16", "w2_16", "w216"]
+        if self._parse_bool(rec.get("use_fill16", "0")) or any(str(rec.get(field, "")).strip() for field in fill16_fields):
             return "fill16"
         return "fill8"
+
+    def _infer_record_channels(self, rec: dict[str, object], fieldnames: list[str] | None = None) -> int:
+        rec = self._canonical_record(rec)
+        if "channels" in rec and str(rec.get("channels", "")).strip():
+            raw = str(rec.get("channels", "")).strip().lower()
+            if raw.isdigit():
+                parsed = int(raw)
+            elif raw in {"rgb", "3", "3ch"}:
+                parsed = 3
+            elif raw in {"rgbw", "4", "4ch"}:
+                parsed = 4
+            elif raw in {"rgbww", "rgbcct", "rgbww/rgbcct", "5", "5ch"}:
+                parsed = 5
+            else:
+                raise ValueError(f"unsupported channel family {raw!r}")
+            if parsed not in (3, 4, 5):
+                raise ValueError(f"unsupported channel count {parsed}")
+            return parsed
+        names = {str(f).strip().lower() for f in (fieldnames or rec.keys()) if f is not None}
+        w2_keys = {"w2", "lower_w2", "upper_w2", "bfi_w2", "w2_16", "w216"}
+        if names.intersection(w2_keys):
+            return 5
+        w_keys = {"w", "w1", "lower_w", "lower_w1", "upper_w", "upper_w1", "bfi_w", "bfi_w1", "w16", "w1_16"}
+        if names.intersection(w_keys):
+            return 4
+        return 3
 
     def _tree_values_for_row(self, row: MeasurementPlanRow):
         lower = ""
         upper = ""
         timing = ""
+        values8 = f"{row.r}/{row.g}/{row.b}"
+        values16 = f"{row.r16}/{row.g16}/{row.b16}"
+        bfi = f"{row.bfi_r}/{row.bfi_g}/{row.bfi_b}"
+        if row.channel_count() >= 4:
+            values8 += f"/{row.w}"
+            values16 += f"/{row.w16}"
+            bfi += f"/{row.bfi_w}"
+        if row.channel_count() >= 5:
+            values8 += f"/{row.w2}"
+            values16 += f"/{row.w2_16}"
+            bfi += f"/{row.bfi_w2}"
         if row.normalized_mode() == "blend8":
-            lower = f"{row.lower_r}/{row.lower_g}/{row.lower_b}/{row.lower_w}"
-            upper = f"{row.upper_r}/{row.upper_g}/{row.upper_b}/{row.upper_w}"
-            timing = f"{row.bfi_r}/{row.bfi_g}/{row.bfi_b}/{row.bfi_w}"
+            lower = f"{row.lower_r}/{row.lower_g}/{row.lower_b}"
+            upper = f"{row.upper_r}/{row.upper_g}/{row.upper_b}"
+            timing = f"{row.bfi_r}/{row.bfi_g}/{row.bfi_b}"
+            if row.channel_count() >= 4:
+                lower += f"/{row.lower_w}"
+                upper += f"/{row.upper_w}"
+                timing += f"/{row.bfi_w}"
+            if row.channel_count() >= 5:
+                lower += f"/{row.lower_w2}"
+                upper += f"/{row.upper_w2}"
+                timing += f"/{row.bfi_w2}"
         return (
             row.name,
             row.normalized_mode(),
-            f"{row.r}/{row.g}/{row.b}/{row.w}",
-            f"{row.r16}/{row.g16}/{row.b16}/{row.w16}",
-            f"{row.bfi_r}/{row.bfi_g}/{row.bfi_b}/{row.bfi_w}",
+            row.channel_label(),
+            values8,
+            values16,
+            bfi,
             lower,
             upper,
             timing,
@@ -2658,9 +2939,14 @@ class App:
         self.tree.insert("", "end", values=self._tree_values_for_row(row))
 
     def add_current_to_plan(self):
-        row = self._build_manual_row()
+        try:
+            row = self._build_manual_row()
+            self._validate_plan_row_compatible(row, context="plan")
+        except Exception as exc:
+            messagebox.showerror("Plan row rejected", str(exc))
+            return
         row.name = f"state_{len(self.measurement_rows):04d}"
-        row.repeats = self.infer_repeats(row.r, row.g, row.b, row.w)
+        row.repeats = self.infer_repeats(row.r, row.g, row.b, row.w, row.w2)
         self.add_plan_row(row)
 
     def on_plan_selection(self, _event=None):
@@ -2687,11 +2973,15 @@ class App:
             g16=row.g16,
             b16=row.b16,
             w16=row.w16,
+            w2_16=row.w2_16,
             mode=row.normalized_mode(),
             lower_r=row.lower_r,
             lower_g=row.lower_g,
             lower_b=row.lower_b,
             lower_w=row.lower_w,
+            w2=row.w2,
+            lower_w2=row.lower_w2,
+            bfi_w2=row.bfi_w2,
         )
 
     def _clear_plan_rows(self):
@@ -2733,75 +3023,127 @@ class App:
             self.log_queue.put(f"[plan] deleted {len(remove_set)} selected entries")
 
     def _dict_int(self, rec, key, default=0):
-        value = rec.get(key, default)
+        rec = self._canonical_record(rec)
+        value = rec.get(str(key).strip().lower(), default)
         if value in (None, ""):
             return int(default)
         return int(value)
 
-    def _row_from_record(self, rec: dict[str, str]) -> MeasurementPlanRow:
+    def _dict_int_any(self, rec, keys: tuple[str, ...] | list[str], default=0):
+        rec = self._canonical_record(rec)
+        for key in keys:
+            key_l = str(key).strip().lower()
+            value = rec.get(key_l, None)
+            if value not in (None, ""):
+                return int(value)
+        return int(default)
+
+    def _row_from_record(self, rec: dict[str, str], fieldnames: list[str] | None = None) -> MeasurementPlanRow:
+        rec = self._canonical_record(rec)
         mode = self._normalize_mode(rec)
+        channels = self._infer_record_channels(rec, fieldnames)
+        w = self._dict_int_any(rec, ("w", "w1"), 0)
+        w2 = self._dict_int(rec, "w2", 0) if channels >= 5 else 0
         lower_r = self._dict_int(rec, "lower_r", 0)
         lower_g = self._dict_int(rec, "lower_g", 0)
         lower_b = self._dict_int(rec, "lower_b", 0)
-        lower_w = self._dict_int(rec, "lower_w", 0)
+        lower_w = self._dict_int_any(rec, ("lower_w", "lower_w1"), 0) if channels >= 4 else 0
+        lower_w2 = self._dict_int(rec, "lower_w2", 0) if channels >= 5 else 0
         upper_r = self._dict_int(rec, "upper_r", self._dict_int(rec, "r", 0))
         upper_g = self._dict_int(rec, "upper_g", self._dict_int(rec, "g", 0))
         upper_b = self._dict_int(rec, "upper_b", self._dict_int(rec, "b", 0))
-        upper_w = self._dict_int(rec, "upper_w", self._dict_int(rec, "w", 0))
+        upper_w = self._dict_int_any(rec, ("upper_w", "upper_w1"), w) if channels >= 4 else 0
+        upper_w2 = self._dict_int(rec, "upper_w2", w2) if channels >= 5 else 0
         r16 = self._dict_int(rec, "r16", self._dict_int(rec, "r", 0) * 257)
         g16 = self._dict_int(rec, "g16", self._dict_int(rec, "g", 0) * 257)
         b16 = self._dict_int(rec, "b16", self._dict_int(rec, "b", 0) * 257)
-        w16 = self._dict_int(rec, "w16", self._dict_int(rec, "w", 0) * 257)
+        w16 = self._dict_int_any(rec, ("w16", "w1_16"), w * 257) if channels >= 4 else 0
+        w2_16 = self._dict_int_any(rec, ("w2_16", "w216"), w2 * 257) if channels >= 5 else 0
         if mode == "blend8":
             r = upper_r
             g = upper_g
             b = upper_b
-            w = upper_w
+            w = upper_w if channels >= 4 else 0
+            w2 = upper_w2 if channels >= 5 else 0
             r16 = upper_r * 257
             g16 = upper_g * 257
             b16 = upper_b * 257
-            w16 = upper_w * 257
+            w16 = upper_w * 257 if channels >= 4 else 0
+            w2_16 = upper_w2 * 257 if channels >= 5 else 0
         else:
             r = self._dict_int(rec, "r", self._q16_to_u8(r16))
             g = self._dict_int(rec, "g", self._q16_to_u8(g16))
             b = self._dict_int(rec, "b", self._q16_to_u8(b16))
-            w = self._dict_int(rec, "w", self._q16_to_u8(w16))
-        return MeasurementPlanRow(name=str(rec.get("name", f"state_{len(self.measurement_rows):04d}")), r=r, g=g, b=b, w=w, bfi_r=self._dict_int(rec, "bfi_r", 0), bfi_g=self._dict_int(rec, "bfi_g", 0), bfi_b=self._dict_int(rec, "bfi_b", 0), bfi_w=self._dict_int(rec, "bfi_w", 0), repeats=max(1, self._dict_int(rec, "repeats", 1)), lower_r=lower_r, lower_g=lower_g, lower_b=lower_b, lower_w=lower_w, upper_r=upper_r, upper_g=upper_g, upper_b=upper_b, upper_w=upper_w, r16=r16, g16=g16, b16=b16, w16=w16, use_fill16=(mode == "fill16"), mode=mode)
+            w = self._dict_int_any(rec, ("w", "w1"), self._q16_to_u8(w16)) if channels >= 4 else 0
+            w2 = self._dict_int(rec, "w2", self._q16_to_u8(w2_16)) if channels >= 5 else 0
+        return MeasurementPlanRow(
+            name=str(rec.get("name", f"state_{len(self.measurement_rows):04d}")),
+            r=r, g=g, b=b, w=w, w2=w2,
+            bfi_r=self._dict_int(rec, "bfi_r", 0),
+            bfi_g=self._dict_int(rec, "bfi_g", 0),
+            bfi_b=self._dict_int(rec, "bfi_b", 0),
+            bfi_w=self._dict_int_any(rec, ("bfi_w", "bfi_w1"), 0) if channels >= 4 else 0,
+            bfi_w2=self._dict_int(rec, "bfi_w2", 0) if channels >= 5 else 0,
+            repeats=max(1, self._dict_int(rec, "repeats", 1)),
+            lower_r=lower_r, lower_g=lower_g, lower_b=lower_b, lower_w=lower_w, lower_w2=lower_w2,
+            upper_r=upper_r, upper_g=upper_g, upper_b=upper_b, upper_w=upper_w, upper_w2=upper_w2,
+            r16=r16, g16=g16, b16=b16, w16=w16, w2_16=w2_16,
+            use_fill16=(mode == "fill16"), mode=mode, channels=channels,
+        )
+
+    def _csv_has_supported_plan_schema(self, fieldnames: list[str]) -> bool:
+        names = {str(f).strip().lower() for f in fieldnames if f is not None}
+        if "mode" in names:
+            return True
+        if {"name", "r", "g", "b"}.issubset(names):
+            return True
+        if {"name", "lower_r", "lower_g", "lower_b", "upper_r", "upper_g", "upper_b"}.issubset(names):
+            return True
+        if {"name", "r16", "g16", "b16"}.issubset(names):
+            return True
+        return False
 
     def _import_plan_csv_path(self, path: str | Path, *, confirm_replace: bool = True) -> bool:
         path = Path(path)
         if self.measurement_rows and confirm_replace and not messagebox.askyesno("Replace plan", "Replace the current plan and clear any saved resume progress?"):
             return False
-        self._clear_plan_rows()
-        self._reset_resume_state()
-        imported = 0
+        rows: list[MeasurementPlanRow] = []
         imported_true16 = 0
         imported_legacy = 0
         with open(path, "r", newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             fieldnames = reader.fieldnames or []
-            required_legacy = ["name", "r", "g", "b", "w", "bfi_r", "bfi_g", "bfi_b", "bfi_w", "repeats"]
-            required_blend8 = ["name", "lower_r", "lower_g", "lower_b", "lower_w", "upper_r", "upper_g", "upper_b", "upper_w"]
-            required_true16 = ["name", "r16", "g16", "b16", "w16"]
-            has_supported = any(all(key in fieldnames for key in req) for req in [required_legacy, required_blend8, required_true16]) or ("mode" in fieldnames)
-            if not has_supported:
-                messagebox.showerror("Import failed", "Unsupported CSV schema.\n\nAccepted schemas:\n1) Legacy fill8\n2) Raw temporal blend8 with lower_*/upper_* columns\n3) True16 fill16")
+            if not self._csv_has_supported_plan_schema(fieldnames):
+                messagebox.showerror(
+                    "Import failed",
+                    "Unsupported CSV schema. Accepted schemas: RGB, RGBW, or RGBWW/RGBCCT fill8; raw temporal blend8; True16 fill16; or generic rows with a mode column.",
+                )
                 return False
             for rec in reader:
                 try:
-                    row = self._row_from_record(rec)
-                    self.add_plan_row(row)
-                    imported += 1
+                    row = self._row_from_record(rec, fieldnames=fieldnames)
+                    self._validate_plan_row_compatible(row, context="plan import")
+                    rows.append(row)
                     if row.normalized_mode() == "fill16":
                         imported_true16 += 1
                     else:
                         imported_legacy += 1
                 except Exception as exc:
-                    self.log_queue.put(f"[plan] skipped bad row during import: {exc}")
+                    self.log_queue.put(f"[plan] import rejected row from {path}: {exc}")
+                    messagebox.showerror("Import failed", f"Rejected row while importing {path.name}:\n\n{exc}")
+                    return False
+        self._clear_plan_rows()
+        self._reset_resume_state()
+        for row in rows:
+            self.add_plan_row(row)
         if imported_true16 > 0:
             self.use_fill16_var.set(True)
         self.plan_source_path = path
-        self.log_queue.put(f"[plan] imported {imported} entries from {path} (legacy/blend8={imported_legacy}, fill16={imported_true16})")
+        max_channels = max((row.channel_count() for row in rows), default=0)
+        self.log_queue.put(
+            f"[plan] imported {len(rows)} entries from {path} "
+            f"(family={self._channel_label(max_channels) if max_channels else 'empty'}, legacy/blend8={imported_legacy}, fill16={imported_true16})"
+        )
         return True
 
     def _resolve_plan_csv_for_report(self, report_path: Path, plan_source_csv: str) -> Path | None:
@@ -2834,12 +3176,13 @@ class App:
             self.tree.see(iid)
 
     def _render_current_state(self):
-        self.send_fill()
+        self.send_fill(show_error=False)
         time.sleep(self.settle_delay_var.get())
         self.commit()
         time.sleep(self.settle_delay_var.get())
 
     def _render_plan_row(self, row: MeasurementPlanRow):
+        self._validate_plan_row_compatible(row, context="plan render")
         self.device.send_frame(KIND_CAL_REQ, self._build_fill_payload(row))
         time.sleep(self.settle_delay_var.get())
         self.device.send_frame(KIND_CAL_REQ, bytes([OP_COMMIT]))
@@ -2856,7 +3199,7 @@ class App:
                 result = self._run_measurement()
                 self.last_measurement = result
                 self.measurement_text.set(self._format_measurement_status(result))
-                out = {"ts": time.time(), "render": {"mode": self.manual_mode_var.get(), "r": self.r_var.get(), "g": self.g_var.get(), "b": self.b_var.get(), "w": self.w_var.get(), "lower_r": self.lower_r_var.get(), "lower_g": self.lower_g_var.get(), "lower_b": self.lower_b_var.get(), "lower_w": self.lower_w_var.get(), "r16": self.r16_var.get(), "g16": self.g16_var.get(), "b16": self.b16_var.get(), "w16": self.w16_var.get(), "w2_16": self.w2_16_var.get(), "bfi_r": self.bfi_r_var.get(), "bfi_g": self.bfi_g_var.get(), "bfi_b": self.bfi_b_var.get(), "bfi_w": self.bfi_w_var.get(), "use_fill16": self.use_fill16_var.get(), "phase_mode": self.phase_mode_var.get(), "phase": self.phase_var.get()}, "measurement": result}
+                out = {"ts": time.time(), "render": {"mode": self.manual_mode_var.get(), "r": self.r_var.get(), "g": self.g_var.get(), "b": self.b_var.get(), "w": self.w_var.get(), "w2": self.w2_var.get(), "lower_r": self.lower_r_var.get(), "lower_g": self.lower_g_var.get(), "lower_b": self.lower_b_var.get(), "lower_w": self.lower_w_var.get(), "lower_w2": self.lower_w2_var.get(), "r16": self.r16_var.get(), "g16": self.g16_var.get(), "b16": self.b16_var.get(), "w16": self.w16_var.get(), "w2_16": self.w2_16_var.get(), "bfi_r": self.bfi_r_var.get(), "bfi_g": self.bfi_g_var.get(), "bfi_b": self.bfi_b_var.get(), "bfi_w": self.bfi_w_var.get(), "bfi_w2": self.bfi_w2_var.get(), "use_fill16": self.use_fill16_var.get(), "phase_mode": self.phase_mode_var.get(), "phase": self.phase_var.get()}, "measurement": result}
                 path = self.capture_dir / f"single_measure_{int(time.time())}.json"
                 path.write_text(json.dumps(out, indent=2), encoding="utf-8")
                 self.log_queue.put(f"[measure] wrote {path}")
@@ -2953,6 +3296,12 @@ class App:
         if not self.device.is_connected():
             messagebox.showerror("Plan", "Connect the Teensy serial device first.")
             return
+        try:
+            for row in self.measurement_rows:
+                self._validate_plan_row_compatible(row, context="plan")
+        except Exception as exc:
+            messagebox.showerror("Plan rejected", str(exc))
+            return
 
         def worker():
             self.running_plan = True
@@ -2985,6 +3334,9 @@ class App:
             next_repeat_index = start_repeat
             stopped = False
             try:
+                target_channels = self._selected_device_channel_count()
+                self.log_queue.put(f"[plan] setting device output mode = {self._channel_label(target_channels)} before plan run")
+                self._set_output_mode_for_strip_wait(target_channels, timeout_s=1.0)
                 self.log_queue.put(f"[plan] setting solver mode = {solver_mode} before plan run")
                 self.device.send_frame(KIND_CAL_REQ, bytes([OP_SET_SOLVER_ENABLED, solver_mode]))
                 time.sleep(self.settle_delay_var.get())
@@ -3006,7 +3358,7 @@ class App:
                             next_repeat_index = start_repeat if idx == start_row else 0
                             break
                         self.root.after(0, lambda i=idx: self.highlight_plan_index(i))
-                        self.root.after(0, lambda r=row: self.set_preview_values(r.r, r.g, r.b, r.w, r.bfi_r, r.bfi_g, r.bfi_b, r.bfi_w, r16=r.r16, g16=r.g16, b16=r.b16, w16=r.w16, mode=r.normalized_mode(), lower_r=r.lower_r, lower_g=r.lower_g, lower_b=r.lower_b, lower_w=r.lower_w))
+                        self.root.after(0, lambda r=row: self.set_preview_values(r.r, r.g, r.b, r.w, r.bfi_r, r.bfi_g, r.bfi_b, r.bfi_w, r16=r.r16, g16=r.g16, b16=r.b16, w16=r.w16, w2_16=r.w2_16, mode=r.normalized_mode(), lower_r=r.lower_r, lower_g=r.lower_g, lower_b=r.lower_b, lower_w=r.lower_w, w2=r.w2, lower_w2=r.lower_w2, bfi_w2=r.bfi_w2))
                         self._render_plan_row(row)
                         repeat_start = start_repeat if idx == start_row else 0
                         for rep in range(repeat_start, max(1, row.repeats)):
@@ -3049,6 +3401,36 @@ class App:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _plan_save_fields(self) -> list[str]:
+        max_channels = max((row.channel_count() for row in self.measurement_rows), default=4)
+        fields = ["name", "mode", "channels", "repeats", "r", "g", "b"]
+        if max_channels == 4:
+            fields.append("w")
+        elif max_channels >= 5:
+            fields.extend(["w1", "w2"])
+        fields.extend(["lower_r", "lower_g", "lower_b"])
+        if max_channels == 4:
+            fields.append("lower_w")
+        elif max_channels >= 5:
+            fields.extend(["lower_w1", "lower_w2"])
+        fields.extend(["upper_r", "upper_g", "upper_b"])
+        if max_channels == 4:
+            fields.append("upper_w")
+        elif max_channels >= 5:
+            fields.extend(["upper_w1", "upper_w2"])
+        fields.extend(["r16", "g16", "b16"])
+        if max_channels == 4:
+            fields.append("w16")
+        elif max_channels >= 5:
+            fields.extend(["w1_16", "w2_16"])
+        fields.extend(["bfi_r", "bfi_g", "bfi_b"])
+        if max_channels == 4:
+            fields.append("bfi_w")
+        elif max_channels >= 5:
+            fields.extend(["bfi_w1", "bfi_w2"])
+        fields.append("use_fill16")
+        return fields
+
     def save_plan_csv(self):
         if not self.measurement_rows:
             messagebox.showinfo("Plan", "No plan rows to save.")
@@ -3056,12 +3438,15 @@ class App:
         path = filedialog.asksaveasfilename(initialdir=str(self.capture_dir), defaultextension=".csv", filetypes=[("CSV files", "*.csv")])
         if not path:
             return
+        fields = self._plan_save_fields()
         with open(path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=GENERIC_PLAN_FIELDS)
+            writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
             writer.writeheader()
             for row in self.measurement_rows:
-                writer.writerow(row.to_dict())
-        self.log_queue.put(f"[plan] saved {path}")
+                data = row.to_dict()
+                writer.writerow({field: data.get(field, "") for field in fields})
+        max_channels = max(row.channel_count() for row in self.measurement_rows)
+        self.log_queue.put(f"[plan] saved {path} ({self._channel_label(max_channels)})")
 
     # -----------------------------------------------------------------------
     # LUT Verifier

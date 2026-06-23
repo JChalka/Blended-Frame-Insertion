@@ -1,6 +1,6 @@
 # Host Calibration GUI
 
-`host_calibration_gui.py` is the Tkinter host application for the Temporal RGBW calibration workflow. It talks to the `Teensy_Temporal_Calibration` firmware over the TCAL USB serial protocol, renders RGBW states on the LED target, triggers ArgyllCMS `spotread`, and writes measurement artifacts for the downstream temporal ladder, RGBW model, 3D LUT, and verifier tools.
+`host_calibration_gui.py` is the Tkinter host application for the Temporal RGBW calibration workflow. It talks to the `Teensy_Temporal_Calibration` firmware over the TCAL USB serial protocol, renders RGB, RGBW, or RGBWW/RGBCCT states on the LED target, triggers ArgyllCMS `spotread`, and writes measurement artifacts for the downstream temporal ladder, RGBW model, 3D LUT, and verifier tools.
 
 The current GUI is more than a simple capture runner. It now supports manual Fill8 / Blend8 / Fill16 rendering, resumable capture plans, spotread preset management, a UDP sparse-capture bridge for external builders, and an integrated LUT / FastLED analytical verifier with trilinear or tetrahedral interpolation, target-gamut selection, transfer selection, out-of-hull projection, and pass/fail CSV export.
 
@@ -39,8 +39,8 @@ The GUI has four main roles:
 
 1. **Manual render host** — send Fill8, Blend8, or Fill16 states to the Teensy, commit them, control phase display, and run one-off measurements.
 2. **Capture plan runner** — import or build CSV measurement plans, execute row × repeat captures, save measurement CSVs, and resume interrupted runs from `.progress.json` files.
-3. **Sparse-capture bridge** — run a local UDP JSON server so external tools, including the standalone [Multi-Emitter-Color-Correction-3DLUT-Builder](https://github.com/JChalka/Multi-Emitter-Color-Correction-3DLUT-Builder), can ask the host to render RGBW16 patches and optionally capture them with the colorimeter.
-4. **Verifier** — load an RGBW 3D LUT or use the firmware's analytical solver, measure a named/generated patch set, compare measured xy against expected source xy, and export verification results.
+3. **Sparse-capture bridge** — run a local UDP JSON server so external tools, including the standalone [Multi-Emitter-Color-Correction-3DLUT-Builder](https://github.com/JChalka/Multi-Emitter-Color-Correction-3DLUT-Builder), can ask the host to render RGBW16 sparse patches and optionally capture them with the colorimeter.
+4. **Verifier** — load an RGB/RGBW/RGBWW 3D LUT or use the firmware's analytical solver, measure a named/generated patch set, compare measured xy against expected source xy, and export verification results.
 
 ## GUI Layout
 
@@ -126,9 +126,9 @@ The manual panel can render quick patches without a CSV plan. It has two input t
 
 | Mode | Meaning |
 |------|---------|
-| **Fill8** | Sends static 8-bit RGBW values. Each channel is 0–255. |
-| **Blend8** | Sends lower/floor RGBW values, upper/current RGBW values, and per-channel BFI counts. |
-| **Fill16** | Sends 16-bit RGBW targets. Each channel is 0–65535. |
+| **Fill8** | Sends static 8-bit RGB, RGBW, or RGBWW/RGBCCT values according to the selected device output mode and plan family. Each 8-bit channel is 0–255. |
+| **Blend8** | Sends lower/floor values, upper/current values, and per-channel BFI counts for RGB, RGBW, or RGBWW/RGBCCT rows. |
+| **Fill16** | Sends 16-bit RGB, RGBW, or RGBWW/RGBCCT targets. Each 16-bit channel is 0–65535. |
 
 ### Manual controls
 
@@ -142,7 +142,7 @@ The manual panel can render quick patches without a CSV plan. It has two input t
 | **Phase mode** | Auto lets the Teensy cycle phases. Manual lets the host force a phase index. |
 | **Phase index** | Manual phase value. The GUI supports the full phase-control range exposed by the firmware constant. |
 | **Apply phase** | Sends the current manual phase index. |
-| **Send State** | Sends the selected Fill8 / Blend8 / Fill16 state to the firmware. |
+| **Send State** | Sends the selected Fill8 / Blend8 / Fill16 state to the firmware after validating that the selected device output mode can carry the requested channel family. |
 | **Temporal Fill16 (Direct RGBW16)** | Sends the current R16/G16/B16/W16 values through `OP_SET_FILL16`, the temporal companion's direct RGBW16 path. |
 | **Temporal Direct RGBWW16** | Sends R16/G16/B16/W16/W2 16 through the RGBWW/RGBCCT direct opcode. Current 4-channel ObjectFLED targets reject this with unsupported-mode status. |
 | **Commit** | Latches the currently staged state into the render pipeline. |
@@ -164,48 +164,59 @@ The plan tab is for automated capture runs. A plan is a CSV containing one row p
 | **Run plan** | Executes the plan from the configured resume row/repeat. |
 | **Pause/Resume** | Pauses after the active measurement finishes, or resumes from pause. |
 | **Stop** | Requests a stop and writes a progress report so the run can be resumed. |
-| **Save plan CSV** | Saves the current plan rows with the generic schema. |
+| **Save plan CSV** | Saves the current plan rows with a family-aware schema. RGB-only plans omit W columns; RGBW plans use historical W columns; RGBWW/RGBCCT plans use W1/W2 columns. |
 
-The tree view shows the row name, mode, RGBW8, RGBW16, BFI, lower/upper values, timing summary, and repeat count.
+The tree view shows the row name, mode, channel family, 8-bit values, 16-bit values, BFI, lower/upper values, timing summary, and repeat count.
 
 ## Measurement Modes
 
 ### Fill8 — static 8-bit brightness
 
-Each channel is driven at a single 8-bit level. This is useful for raw per-channel anchor captures and quick manual sanity checks.
+Each channel is driven at a single 8-bit level. RGB-only rows contain R/G/B only. RGBW rows contain R/G/B/W. RGBWW/RGBCCT rows contain R/G/B/W1/W2. This is useful for raw per-channel anchor captures and quick manual sanity checks.
 
 ### Blend8 — temporal blend capture
 
-Each channel is represented by lower/floor values, upper/current values, and per-channel BFI insertion counts. The firmware renders the temporal state according to its current blend / BFI implementation. This mode is used for temporal ladder characterization and low-level display-behavior captures.
+Each channel is represented by lower/floor values, upper/current values, and per-channel BFI insertion counts. RGBWW/RGBCCT rows add `lower_w2`, `upper_w2`, and `bfi_w2` alongside W1. The firmware renders the temporal state according to its current blend / BFI implementation. This mode is used for temporal ladder characterization and low-level display-behavior captures.
 
 ### Fill16 — True16 / solver-driven target values
 
-Each channel receives a 16-bit target. In plan mode, **Plan uses solver mode** controls whether the firmware's solver is enabled before the run. In manual/verifier paths, Fill16 values are also used to drive RGBW outputs directly through the firmware protocol.
+Each channel receives a 16-bit target. RGB-only rows contain R16/G16/B16, RGBW rows add W16, and RGBWW/RGBCCT rows use W1_16/W2_16. In plan mode, **Plan uses solver mode** controls whether the firmware's solver is enabled before the run. In manual/verifier paths, Fill16 values are also used to drive direct output through the firmware protocol.
 
 ## Capture Plan CSV Format
 
-The importer accepts older and newer schemas. Supported plan shapes include:
+The importer accepts older and newer schemas for three explicit output families: RGB, RGBW, and RGBWW/RGBCCT. The row family must fit inside the selected **Device output mode** before the plan is displayed or run. For example, an RGBWW/RGBCCT plan cannot be imported while the device mode is RGB or RGBW, and an RGBW plan cannot be imported while the device mode is RGB. The GUI logs a clear error and rejects the row rather than dropping W or W2 data. RGB, RGBW, and RGBWW/RGBCCT plans are all legal on an RGBWW/RGBCCT target.
 
-1. Legacy Fill8 rows with `name`, `r`, `g`, `b`, `w`, `bfi_r`, `bfi_g`, `bfi_b`, `bfi_w`, and `repeats`.
-2. Raw Blend8 rows with `name`, `lower_r`…`lower_w`, `upper_r`…`upper_w`, and optional BFI/repeat columns.
-3. True16 Fill16 rows with `name`, `r16`, `g16`, `b16`, `w16`, and optional repeat/mode columns.
-4. Generic rows containing a `mode` column and any matching fields from the table below.
+Supported plan shapes include:
 
-Generic schema fields written by **Save plan CSV**:
+1. RGB Fill8 rows with `name`, `r`, `g`, `b`, optional `bfi_r`, `bfi_g`, `bfi_b`, and optional `repeats`.
+2. RGBW Fill8 rows with `name`, `r`, `g`, `b`, `w`, optional `bfi_r`…`bfi_w`, and optional `repeats`.
+3. RGBWW/RGBCCT Fill8 rows with `name`, `r`, `g`, `b`, `w1`, `w2`, optional `bfi_r`…`bfi_w1`/`bfi_w2`, and optional `repeats`.
+4. Raw Blend8 rows with `lower_*`, `upper_*`, and optional BFI/repeat columns for the same family. RGBW uses `lower_w` / `upper_w`; RGBWW/RGBCCT uses `lower_w1`, `lower_w2`, `upper_w1`, and `upper_w2`.
+5. True16 Fill16 rows with `r16`, `g16`, `b16`; RGBW adds `w16`; RGBWW/RGBCCT adds `w1_16` and `w2_16`. `w2_16` is also accepted as `w216` for compatibility with tools that avoid underscores.
+6. Generic rows containing a `mode` column and any matching fields from the table below.
+
+Generic schema fields written by **Save plan CSV** are family-aware. RGB-only saves omit white columns. RGBW saves use historical W names. RGBWW/RGBCCT saves use W1/W2 names.
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `name` | string | Human-readable patch/state name. |
 | `mode` | string | `fill8`, `blend8`, or `fill16`. |
+| `channels` | int/string | Optional explicit family marker: `3`/`RGB`, `4`/`RGBW`, or `5`/`RGBWW`/`RGBCCT`. |
 | `repeats` | int | Measurements per row. Values below 1 are coerced to 1. |
-| `r`, `g`, `b`, `w` | int | 8-bit current/upper values. |
-| `lower_r`…`lower_w` | int | Blend8 lower/floor values. |
-| `upper_r`…`upper_w` | int | Blend8 upper/current values. |
-| `r16`…`w16` | int | 16-bit Fill16 targets. |
-| `bfi_r`…`bfi_w` | int | Per-channel BFI values. |
+| `r`, `g`, `b` | int | 8-bit RGB current/upper values. |
+| `w` | int | Historical RGBW first-white channel. Also accepted as W1 when importing. |
+| `w1`, `w2` | int | RGBWW/RGBCCT 8-bit first-white and second-white/CCT channels. |
+| `lower_r`…`lower_b` | int | Blend8 RGB lower/floor values. |
+| `lower_w` / `lower_w1`, `lower_w2` | int | Blend8 white lower/floor values for RGBW or RGBWW/RGBCCT rows. |
+| `upper_r`…`upper_b` | int | Blend8 RGB upper/current values. |
+| `upper_w` / `upper_w1`, `upper_w2` | int | Blend8 white upper/current values for RGBW or RGBWW/RGBCCT rows. |
+| `r16`, `g16`, `b16` | int | 16-bit RGB Fill16 targets. |
+| `w16` / `w1_16`, `w2_16` | int | 16-bit white Fill16 targets for RGBW or RGBWW/RGBCCT rows. |
+| `bfi_r`…`bfi_b` | int | Per-channel RGB BFI values. |
+| `bfi_w` / `bfi_w1`, `bfi_w2` | int | Per-white BFI values for RGBW or RGBWW/RGBCCT rows. |
 | `use_fill16` | 0/1 | Explicit Fill16 compatibility flag. |
 
-Rows normalize to one of `fill8`, `blend8`, or `fill16`. For Blend8 rows, the displayed `r/g/b/w` values are derived from the upper values, and the 16-bit preview values are upper × 257.
+Rows normalize to one of `fill8`, `blend8`, or `fill16`. For Blend8 rows, the displayed current values are derived from the upper values, and the 16-bit preview values are upper × 257.
 
 ## Output: Plan Capture CSV
 
@@ -213,11 +224,11 @@ Each plan run writes a timestamped capture CSV in the capture directory. Plans c
 
 | Column | Description |
 |--------|-------------|
-| `name`, `mode`, `use_fill16` | State identity and normalized mode. |
-| `r`–`w` | 8-bit current/upper values. |
-| `lower_*`, `upper_*` | Blend8 floor and ceiling values. |
-| `r16`–`w16` | 16-bit target values. |
-| `bfi_*` | Per-channel BFI values. |
+| `name`, `mode`, `channels`, `use_fill16` | State identity, normalized mode, and channel family. |
+| `r`, `g`, `b`, `w`, `w2` | 8-bit current/upper values. RGB rows leave white fields absent/zero; RGBWW/RGBCCT rows include W2. |
+| `lower_*`, `upper_*` | Blend8 floor and ceiling values, including `*_w2` when present. |
+| `r16`, `g16`, `b16`, `w16`, `w2_16` | 16-bit target values. |
+| `bfi_*` | Per-channel BFI values, including `bfi_w2` when present. |
 | `repeat_index` | Zero-based repeat index. |
 | `solver_mode` | Whether plan solver mode was enabled for the run. |
 | `measurement_format` | Parsed Argyll output format. |
@@ -306,7 +317,7 @@ When **Output** is `3D LUT`, the verifier:
 2. Looks up the output tuple in the loaded `(N,N,N,C)` LUT.
 3. Uses either tetrahedral or trilinear interpolation.
 4. Validates that the selected strip type can carry the cube output type. RGB cubes can drive RGB, RGBW, or RGBWW/RGBCCT strips by padding missing white channels with zero. RGBW cubes can drive RGBW or RGBWW/RGBCCT strips. RGBWW/RGBCCT cubes require a 5-channel strip transport.
-5. Sends the resulting output using the selected strip transport. RGB/RGBW output uses `OP_SET_FILL16`; RGB output sends W=0. RGBWW/RGBCCT output uses `OP_SET_DIRECT_RGBWW16`.
+5. Sends the resulting output using the selected strip transport. RGB targets use 3-channel `OP_SET_FILL16`, RGBW targets use 4-channel `OP_SET_FILL16`, and RGBWW/RGBCCT targets use `OP_SET_DIRECT_RGBWW16` with missing W/W2 channels padded to zero.
 6. Measures the rendered output with `spotread`.
 7. Computes expected xy and dE.
 
@@ -459,14 +470,14 @@ These opcodes are used by both current firmware roles unless noted by the target
 |--------|------|----------------------|---------------------|
 | `0x00` | `OP_GET_STATE` | none | Current state response. |
 | `0x20` | `OP_SET_RENDER_ENABLED` | byte 1: nonzero enables render output | Current state response. |
-| `0x21` | `OP_SET_FILL` | bytes 1..4: 8-bit R,G,B,W; bytes 5..8: BFI R,G,B,W | Sets Fill8-style values and BFI fields. |
+| `0x21` | `OP_SET_FILL` | Payload follows the selected output mode: RGB uses R,G,B plus BFI R,G,B; RGBW uses R,G,B,W plus BFI R,G,B,W; RGBWW/RGBCCT uses R,G,B,W1,W2 plus BFI R,G,B,W1,W2. Lower-family rows on wider targets are padded upward with zeroed missing channels. | Sets Fill8-style values and BFI fields. Firmware that does not support the selected channel count should reject the request with `STATUS_BAD_PAYLOAD` or unsupported-mode status. |
 | `0x23` | `OP_CLEAR` | none | Clears output buffers and state. |
 | `0x24` | `OP_SET_PHASE` | byte 1: explicit temporal tick / phase value | Sets manual phase index. |
 | `0x26` | `OP_COMMIT` | none | Acknowledge/latch point for the currently staged render state. |
 | `0x28` | `OP_SET_PHASE_MODE` | byte 1: `0x00` auto, `0x01` manual | Selects automatic or host-forced phase control. |
 | `0x29` | `OP_SET_SOLVER_ENABLED` | byte 1: nonzero enables solver mode | Enables/disables firmware solver mode for plan execution. |
-| `0x2A` | `OP_SET_TEMPORAL_BLEND` | bytes 1..4: lower R,G,B,W; bytes 5..8: upper R,G,B,W; bytes 9..12: BFI R,G,B,W | Sends a Blend8 lower/upper/BFI state. |
-| `0x2B` | `OP_SET_FILL16` | u16be R,G,B,W at offsets 1,3,5,7 | Sends 16-bit RGBW targets. Unsupported status may be returned if the active target mode cannot represent the requested channels. |
+| `0x2A` | `OP_SET_TEMPORAL_BLEND` | Payload follows the selected output mode: RGB uses lower/upper/BFI R,G,B; RGBW adds W; RGBWW/RGBCCT adds W1/W2. Lower-family rows on wider targets are padded upward with zeroed missing channels. | Sends a Blend8 lower/upper/BFI state. Firmware that does not support the selected channel count should reject the request with `STATUS_BAD_PAYLOAD` or unsupported-mode status. |
+| `0x2B` | `OP_SET_FILL16` | u16be channels following selected output mode: RGB uses R,G,B; RGBW uses R,G,B,W. | Sends 16-bit RGB/RGBW targets. When the selected target is RGBWW/RGBCCT, Fill16 rows use `OP_SET_DIRECT_RGBWW16` with zero-padded missing W/W2 channels so W2 is never folded into W. Unsupported status may be returned if firmware cannot represent the requested channels. |
 | `0x2E` | `OP_SET_OUTPUT_MODE` | byte 1: `OUTPUT_MODE_*` | Requests RGB, RGBW, or RGBWW logical output mode. |
 
 ### FastLED analytical verifier opcodes
@@ -511,11 +522,11 @@ FastLED analytical input-gamut values:
 
 ### Direct-output companion opcodes
 
-The temporal calibration companion uses the shared Fill16 opcode for direct RGBW16 output. It does not accept a duplicate `0x2F` RGBW16 direct path.
+The temporal calibration companion uses the shared Fill16 opcode for direct RGB/RGBW16 output. It does not accept a duplicate `0x2F` RGBW16 direct path.
 
 | Opcode | Name | Payload after opcode | Behavior |
 |--------|------|----------------------|----------|
-| `0x2B` | `OP_SET_FILL16` | u16be R,G,B,W at offsets 1,3,5,7 | Applies direct RGBW16 output values through the TemporalBFI true16 render path. RGB-only targets reject nonzero W. |
+| `0x2B` | `OP_SET_FILL16` | u16be R,G,B for RGB targets or R,G,B,W for RGBW targets | Applies direct RGB/RGBW16 output values through the TemporalBFI true16 render path. Lower-family rows on wider targets are padded by the host before transport. |
 | `0x30` | `OP_SET_DIRECT_RGBWW16` | u16be R,G,B,W1,W2 at offsets 1,3,5,7,9 | Rejected unless a future native 5-channel ObjectFLED target is available. W2 is never folded into W. |
 
 ### FastLED analytical response layout
@@ -597,13 +608,13 @@ Set-profile validation requires each x and y to be greater than 0 and less than 
 5. Run the plan.
 6. Feed the capture CSV into the temporal ladder pruning/interpolation tools.
 
-### Workflow 2: True16 RGBW patch capture
+### Workflow 2: True16 RGB/RGBW/RGBCCT patch capture
 
-1. Generate a True16 / Fill16 RGBW patch plan.
+1. Generate a True16 / Fill16 RGB, RGBW, or RGBWW/RGBCCT patch plan.
 2. Import the CSV.
 3. Enable **Plan uses solver mode** if the firmware should map the 16-bit targets through its calibrated solver path.
 4. Run the plan.
-5. Use the resulting CSV for RGBW model fitting, LUT builder input, or verifier/reference datasets.
+5. Use the resulting CSV for RGBW/RGBWW model fitting, LUT builder input, or verifier/reference datasets.
 
 ### Workflow 3: External sparse capture through UDP
 
