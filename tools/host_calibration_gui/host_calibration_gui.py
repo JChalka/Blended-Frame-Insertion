@@ -24,7 +24,7 @@ import serial.tools.list_ports
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-APP_TITLE = "Temporal RGBW Calibration Host v7.5.5"
+APP_TITLE = "Temporal RGBW Calibration Host v7.5.6"
 DEFAULT_SERIAL_BAUD = 30000000
 DEFAULT_ARTIFACT_DIR = Path(__file__).resolve().parent / "captures"
 FRAME_HEADER = b"TCAL"
@@ -51,14 +51,12 @@ OP_SET_FILL16 = 0x2B
 OP_SET_ANALYTICAL_RGB16 = 0x2C
 OP_GET_DIODE_PROFILE = 0x2D
 OP_SET_OUTPUT_MODE = 0x2E
-# 0x2F/0x30 are shared by the two Phase-8 sketches.
-# FastLED analytical treats them as analytical direct RGBW/RGBWW requests;
-# the temporal companion treats them as direct-output RGBW/RGBWW requests.
-OP_SET_DIRECT_RGBW16 = 0x2F
-OP_SET_ANALYTICAL_RGBW16 = OP_SET_DIRECT_RGBW16
+# Temporal direct companion opcode for RGBWW direct requests.
+# Temporal direct RGBW requests use OP_SET_FILL16.
 OP_SET_DIRECT_RGBWW16 = 0x30
-OP_SET_ANALYTICAL_RGBWW16 = OP_SET_DIRECT_RGBWW16
 OP_SET_DIODE_PROFILE = 0x31
+OP_GET_INPUT_GAMUT = 0x32
+OP_SET_INPUT_GAMUT = 0x33
 
 STATUS_OK = 0x00
 STATUS_BAD_PAYLOAD = 0x01
@@ -66,6 +64,8 @@ STATUS_BAD_OPCODE = 0x02
 STATUS_SOLVE_FAILED = 0x03
 STATUS_UNSUPPORTED_OUTPUT_MODE = 0x04
 STATUS_BAD_PROFILE = 0x05
+STATUS_UNSUPPORTED_MODEL = 0x06
+STATUS_UNSUPPORTED_GAMUT = 0x07
 STATUS_NAMES = {
     STATUS_OK: "OK",
     STATUS_BAD_PAYLOAD: "BAD_PAYLOAD",
@@ -73,6 +73,8 @@ STATUS_NAMES = {
     STATUS_SOLVE_FAILED: "SOLVE_FAILED",
     STATUS_UNSUPPORTED_OUTPUT_MODE: "UNSUPPORTED_OUTPUT_MODE",
     STATUS_BAD_PROFILE: "BAD_PROFILE",
+    STATUS_UNSUPPORTED_MODEL: "UNSUPPORTED_MODEL",
+    STATUS_UNSUPPORTED_GAMUT: "UNSUPPORTED_GAMUT",
 }
 
 OUTPUT_MODE_RGB = 0x00
@@ -88,11 +90,17 @@ OUTPUT_MODE_NAMES = {value: key for key, value in OUTPUT_MODE_CHOICES.items()}
 PHASE_MODE_AUTO = 0
 PHASE_MODE_MANUAL = 1
 
-ANALYTICAL_MODEL_SUB_GAMUT = 0
-ANALYTICAL_MODEL_LP_LEGACY = 1
+ANALYTICAL_MODEL_RGBW_STRICT_SUB_GAMUT = 0
+ANALYTICAL_MODEL_RGBW_LP_LEGACY = 1
+ANALYTICAL_MODEL_RGBWW_OVERDRIVE = 2
+ANALYTICAL_MODEL_RGB_DIRECT_STUB = 3
+ANALYTICAL_MODEL_RGBWW_STRICT_STUB = 4
 ANALYTICAL_MODEL_CHOICES = {
-    "sub-gamut": ANALYTICAL_MODEL_SUB_GAMUT,
-    "lp_legacy": ANALYTICAL_MODEL_LP_LEGACY,
+    "rgbw_strict_sub_gamut": ANALYTICAL_MODEL_RGBW_STRICT_SUB_GAMUT,
+    "rgbw_lp_legacy": ANALYTICAL_MODEL_RGBW_LP_LEGACY,
+    "rgbww_overdrive": ANALYTICAL_MODEL_RGBWW_OVERDRIVE,
+    "rgb_direct_stub": ANALYTICAL_MODEL_RGB_DIRECT_STUB,
+    "rgbww_strict_stub": ANALYTICAL_MODEL_RGBWW_STRICT_STUB,
 }
 DUAL_EDGE_POLICY_Y_CORRECT_CLIP = 0
 DUAL_EDGE_POLICY_ROLLOFF_AFTER_CLIP = 1
@@ -105,13 +113,46 @@ DUAL_EDGE_POLICY_CHOICES = {
 DUAL_EDGE_POLICY_NAMES = {
     value: key for key, value in DUAL_EDGE_POLICY_CHOICES.items()
 }
+INPUT_GAMUT_NATIVE = 0
+INPUT_GAMUT_REC709 = 1
+INPUT_GAMUT_REC2020 = 2
+INPUT_GAMUT_DCI_P3_D65 = 3
+INPUT_GAMUT_DCI_P3_D60 = 4
+FASTLED_INPUT_GAMUT_CHOICES = {
+    "summary/native": INPUT_GAMUT_NATIVE,
+    "rec709": INPUT_GAMUT_REC709,
+    "rec2020": INPUT_GAMUT_REC2020,
+    "dci-p3": INPUT_GAMUT_DCI_P3_D65,
+    "dci-p3-d65": INPUT_GAMUT_DCI_P3_D65,
+    "dci-p3-d60": INPUT_GAMUT_DCI_P3_D60,
+}
+FASTLED_INPUT_GAMUT_NAMES = {
+    INPUT_GAMUT_NATIVE: "summary/native",
+    INPUT_GAMUT_REC709: "rec709",
+    INPUT_GAMUT_REC2020: "rec2020",
+    INPUT_GAMUT_DCI_P3_D65: "dci-p3",
+    INPUT_GAMUT_DCI_P3_D60: "dci-p3-d60",
+}
 ANALYTICAL_SOLVE_PATHS = {
     0: "none",
     1: "strict_sub_gamut",
     2: "lp_legacy",
     3: "strict_failed",
+    4: "rgbww_overdrive",
+    5: "unavailable",
 }
 VERIFIER_OUTPUT_SOURCES = ["3D LUT", "FastLED analytical MCU"]
+STRIP_TYPE_CHOICES = {
+    "RGB": 3,
+    "RGBW": 4,
+    "RGBWW/RGBCCT": 5,
+}
+CUBE_OUTPUT_TYPE_CHOICES = {
+    "auto": 0,
+    "RGB": 3,
+    "RGBW": 4,
+    "RGBWW/RGBCCT": 5,
+}
 
 MAX_BFI = 4
 BLEND_CYCLE_LENGTH = MAX_BFI + 1
@@ -263,6 +304,10 @@ _VERIFIER_NAMED_PATCHES: list[tuple[str, int, int, int]] = [
     ("dark_red",       12000,  0,      0),
     ("dark_green",     0,      12000,  0),
     ("dark_blue",      0,      0,      12000),
+    # Super-Dark primary (Test lowest possible code values)
+    ("super_dark_red",     1,  0,      0),
+    ("super_dark_green",   0,      1,  0),
+    ("super_dark_blue",    0,      0,  1),
 ]
 
 # Keep the original name accessible for any code that still uses it.
@@ -346,16 +391,16 @@ def _lut_axis_position(v16: int, grid_size: int) -> tuple[int, int, float]:
     return lo, lo + 1, frac
 
 
-def _clamp_lut_result(values: np.ndarray) -> tuple[int, int, int, int]:
+def _clamp_lut_result(values: np.ndarray) -> tuple[int, ...]:
     arr = np.asarray(values, dtype=float)
     arr = np.clip(np.rint(arr), 0.0, 65535.0).astype(np.uint16)
-    return int(arr[0]), int(arr[1]), int(arr[2]), int(arr[3])
+    return tuple(int(v) for v in arr.tolist())
 
 
 def _trilinear_lut_lookup(
     cube: np.ndarray, r16: int, g16: int, b16: int
-) -> tuple[int, int, int, int]:
-    """Trilinear interpolation in an (N,N,N,4) uint16 LUT cube (axis 0..65535)."""
+) -> tuple[int, ...]:
+    """Trilinear interpolation in an (N,N,N,C) uint16 LUT cube (axis 0..65535)."""
     N = cube.shape[0]
     r0, r1, fr = _lut_axis_position(r16, N)
     g0, g1, fg = _lut_axis_position(g16, N)
@@ -382,8 +427,8 @@ def _trilinear_lut_lookup(
 
 def _tetrahedral_lut_lookup(
     cube: np.ndarray, r16: int, g16: int, b16: int
-) -> tuple[int, int, int, int]:
-    """Tetrahedral interpolation in an (N,N,N,4) uint16 LUT cube.
+) -> tuple[int, ...]:
+    """Tetrahedral interpolation in an (N,N,N,C) uint16 LUT cube.
 
     This follows the standard six-tetrahedra decomposition of a cube.  On the
     neutral diagonal, equal channel fractions use only the V000->V111 diagonal
@@ -429,7 +474,7 @@ def _tetrahedral_lut_lookup(
 
 def _lut_lookup(
     cube: np.ndarray, r16: int, g16: int, b16: int, interpolation: str = "tetrahedral"
-) -> tuple[int, int, int, int]:
+) -> tuple[int, ...]:
     mode = (interpolation or "tetrahedral").strip().lower()
     if mode == "trilinear":
         return _trilinear_lut_lookup(cube, r16, g16, b16)
@@ -440,6 +485,7 @@ def _lut_lookup(
 
 
 _VERIFIER_D65_XY = (0.3127, 0.3290)
+_VERIFIER_D60_XY = (0.32168, 0.33767)
 _VERIFIER_GAMUT_PRIMARIES: dict[str, dict[str, tuple[float, float]]] = {
     "rec709": {
         "R": (0.6400, 0.3300),
@@ -456,13 +502,21 @@ _VERIFIER_GAMUT_PRIMARIES: dict[str, dict[str, tuple[float, float]]] = {
         "G": (0.2650, 0.6900),
         "B": (0.1500, 0.0600),
     },
+    "dci-p3-d60": {
+        "R": (0.6800, 0.3200),
+        "G": (0.2650, 0.6900),
+        "B": (0.1500, 0.0600),
+    },
     "adobe-rgb": {
         "R": (0.6400, 0.3300),
         "G": (0.2100, 0.7100),
         "B": (0.1500, 0.0600),
     },
 }
-_VERIFIER_GAMUT_CHOICES = ["summary/native", "rec709", "rec2020", "dci-p3", "adobe-rgb"]
+_VERIFIER_GAMUT_WHITE_XY = {
+    "dci-p3-d60": _VERIFIER_D60_XY,
+}
+_VERIFIER_GAMUT_CHOICES = ["summary/native", "rec709", "rec2020", "dci-p3", "dci-p3-d60", "adobe-rgb"]
 _VERIFIER_TRANSFER_CHOICES = ["linear", "gamut"]
 _VERIFIER_INTERPOLATION_CHOICES = ["tetrahedral", "trilinear"]
 
@@ -496,7 +550,10 @@ def _verifier_build_rgb_to_xyz_matrix(
 
 
 _VERIFIER_GAMUT_MATRICES = {
-    name: _verifier_build_rgb_to_xyz_matrix(primaries)
+    name: _verifier_build_rgb_to_xyz_matrix(
+        primaries,
+        _VERIFIER_GAMUT_WHITE_XY.get(name, _VERIFIER_D65_XY),
+    )
     for name, primaries in _VERIFIER_GAMUT_PRIMARIES.items()
 }
 
@@ -514,7 +571,7 @@ def _verifier_apply_transfer_normalized(rgb: np.ndarray, gamut: str, transfer: s
         return np.where(v <= 0.04045, v / 12.92, ((v + 0.055) / 1.055) ** 2.4)
     if gamut == "rec2020":
         return v ** 2.4
-    if gamut == "dci-p3":
+    if gamut in {"dci-p3", "dci-p3-d60"}:
         return v ** 2.6
     if gamut == "adobe-rgb":
         return v ** 2.2
@@ -817,15 +874,26 @@ def _decode_diode_profile_payload(payload: bytes | bytearray) -> dict[str, objec
         return None
     version = int(data[magic_offset + 4])
     fmt = int(data[magic_offset + 5])
-    if version != 1 or fmt != 1:
+    if version != 1:
         return None
+    if fmt == 1:
+        channel_order = list("RGBW")
+    elif fmt == 2:
+        channel_order = ["R", "G", "B", "WW", "WC"]
+    elif fmt == 3:
+        channel_order = list("RGB")
+    else:
+        return None
+
     values_offset = magic_offset + 6
-    if len(data) < values_offset + 48:
+    required_bytes = 12 * len(channel_order)
+    if len(data) < values_offset + required_bytes:
         return None
+
     primaries_xy: dict[str, list[float]] = {}
     relative_y: dict[str, float] = {}
     off = values_offset
-    for ch in "RGBW":
+    for ch in channel_order:
         x = _u32_be_from_payload(data, off) / 1000000.0; off += 4
         y = _u32_be_from_payload(data, off) / 1000000.0; off += 4
         rel_y = _u32_be_from_payload(data, off) / 1000000.0; off += 4
@@ -833,10 +901,15 @@ def _decode_diode_profile_payload(payload: bytes | bytearray) -> dict[str, objec
         relative_y[ch] = float(rel_y)
     return {
         "version": version,
-        "format": "u32be_q1e6",
+        "format": (
+            "u32be_q1e6_rgbw" if fmt == 1
+            else "u32be_q1e6_rgbww" if fmt == 2
+            else "u32be_q1e6_rgb"
+        ),
+        "format_id": fmt,
         "primaries_xy": primaries_xy,
         "relative_y": relative_y,
-        "channel_order": list("RGBW"),
+        "channel_order": channel_order,
         "source": "teensy_diode_profile",
     }
 
@@ -1011,7 +1084,12 @@ class DirectSerialClient:
             msg["payload_len"] = payload_len
             op = msg.get("op")
             is_diode_profile_response = op in (OP_GET_DIODE_PROFILE, OP_SET_DIODE_PROFILE)
+            is_input_gamut_response = op in (OP_GET_INPUT_GAMUT, OP_SET_INPUT_GAMUT)
             is_analytical_state = (payload_len >= 64) or (payload_len >= 51 and not is_diode_profile_response)
+            if is_input_gamut_response and payload_len >= 4:
+                msg["input_gamut"] = payload[2]
+                msg["supported_input_gamut_bitmask"] = payload[3]
+                msg["input_gamut_response_version"] = payload[4] if payload_len > 4 else None
 
             # FastLED analytical verifier response, old 51/52-byte layout or new 64-byte layout.
             if is_analytical_state and payload_len >= 26:
@@ -1055,11 +1133,18 @@ class DirectSerialClient:
                 msg["last_input_w16"] = (payload[56] << 8) | payload[57]
                 msg["last_input_w2_16"] = (payload[58] << 8) | payload[59]
                 msg["last_solved_w2_16"] = (payload[60] << 8) | payload[61]
+                solved = msg.get("solved_rgbw16")
+                if isinstance(solved, list) and len(solved) == 4:
+                    logical_channels = int(msg.get("active_logical_channel_count", 4))
+                    solved_channels = list(solved)
+                    if logical_channels >= 5:
+                        solved_channels.append(int(msg["last_solved_w2_16"]))
+                    msg["solved_channels16"] = solved_channels
                 msg["fold_stub_flag"] = payload[62]
                 msg["response_extension_version"] = payload[63]
 
             # Teensy temporal calibration companion Phase-8 state response.
-            if (not is_analytical_state) and (not is_diode_profile_response) and payload_len >= 30:
+            if (not is_analytical_state) and (not is_diode_profile_response) and (not is_input_gamut_response) and payload_len >= 30:
                 msg["solver_enabled"] = payload[17] if payload_len > 17 else None
                 msg["active_output_mode"] = payload[18]
                 msg["supported_output_mode_bitmask"] = payload[19]
@@ -1082,7 +1167,10 @@ class DirectSerialClient:
                     physical = msg.get("physical_output_channel_count")
                     logical = msg.get("active_logical_channel_count")
                     mode_text = f" mode={mode_name} supported=0x{supported:02X} phys={physical} logical={logical}"
-                if is_diode_profile_response and "diode_profile" in msg:
+                if is_input_gamut_response and "input_gamut" in msg:
+                    gamut_name = FASTLED_INPUT_GAMUT_NAMES.get(int(msg["input_gamut"]), f"gamut{msg['input_gamut']}")
+                    self._log(f"[rx] input gamut op=0x{msg['op']:02X} status={status_text} gamut={gamut_name}")
+                elif is_diode_profile_response and "diode_profile" in msg:
                     self._log(f"[rx] diode profile op=0x{msg['op']:02X} status={status_text}{mode_text}")
                 else:
                     self._log(f"[rx] cal op=0x{msg['op']:02X} status={status_text} phase={msg['phase']}{mode_text}")
@@ -1434,6 +1522,7 @@ class App:
         self.plan_report_path: Path | None = None
         self.resume_capture_path: Path | None = None
         self.plan_source_path: Path | None = None
+        self._last_teensy_diode_profile: dict[str, object] | None = None
         # --- UDP capture bridge state ---
         self.udp_capture_socket: socket.socket | None = None
         self.udp_capture_thread: threading.Thread | None = None
@@ -1441,6 +1530,7 @@ class App:
         self.udp_capture_lock = threading.Lock()
         # --- LUT verifier state ---
         self.verifier_lut: np.ndarray | None = None
+        self.verifier_lut_channel_count: int | None = None
         self.verifier_summary: dict = {}
         self.verifier_results: list[dict] = []
         self.verifier_running: bool = False
@@ -1448,7 +1538,9 @@ class App:
         self._verifier_preset_var = tk.StringVar(value="quick")
         self._verifier_interp_var = tk.StringVar(value="tetrahedral")
         self._verifier_output_source_var = tk.StringVar(value=VERIFIER_OUTPUT_SOURCES[0])
-        self._verifier_analytical_model_var = tk.StringVar(value="sub-gamut")
+        self._verifier_strip_type_var = tk.StringVar(value="RGBW")
+        self._verifier_cube_output_type_var = tk.StringVar(value="auto")
+        self._verifier_analytical_model_var = tk.StringVar(value="rgbw_strict_sub_gamut")
         self._verifier_dual_edge_policy_var = tk.StringVar(value="y_correct_clip")
         self._verifier_gamut_var = tk.StringVar(value="summary/native")
         self._verifier_transfer_var = tk.StringVar(value="linear")
@@ -1459,6 +1551,7 @@ class App:
         self._verifier_auto_measure_basis_var = tk.BooleanVar(value=True)
         self._device_output_mode_var = tk.StringVar(value="RGBW")
         self._device_output_mode_status_var = tk.StringVar(value="device mode: unknown")
+        self._fastled_input_gamut_status_var = tk.StringVar(value="FastLED input gamut: unknown")
         self.w2_16_var = tk.IntVar(value=0)
         self.build_ui()
         self.refresh_serial_ports()
@@ -1699,8 +1792,8 @@ class App:
         btns = ttk.Frame(box)
         btns.pack(fill="x", padx=8, pady=8)
         ttk.Button(btns, text="Send State", command=self.send_fill).pack(side="left", padx=4)
-        ttk.Button(btns, text="Direct RGBW16", command=self.send_direct_rgbw16).pack(side="left", padx=4)
-        ttk.Button(btns, text="Direct RGBWW16", command=self.send_direct_rgbww16).pack(side="left", padx=4)
+        ttk.Button(btns, text="Temporal Fill16 (Direct RGBW16)", command=self.send_direct_rgbw16).pack(side="left", padx=4)
+        ttk.Button(btns, text="Temporal Direct RGBWW16", command=self.send_direct_rgbww16).pack(side="left", padx=4)
         ttk.Button(btns, text="Commit", command=self.commit).pack(side="left", padx=4)
         ttk.Button(btns, text="Clear", command=self.clear).pack(side="left", padx=4)
         ttk.Button(btns, text="Measure Once", command=self.measure_once).pack(side="left", padx=12)
@@ -2222,8 +2315,8 @@ class App:
             row.bfi_w & 0xFF,
         ])
 
-    def _build_direct_rgbw16_payload(self, values: list[int] | tuple[int, int, int, int]) -> bytes:
-        payload = bytearray([OP_SET_DIRECT_RGBW16])
+    def _build_fill16_payload(self, values: list[int] | tuple[int, int, int, int]) -> bytes:
+        payload = bytearray([OP_SET_FILL16])
         for value in values:
             payload.extend(self._pack_u16(value))
         return bytes(payload)
@@ -2234,27 +2327,129 @@ class App:
             payload.extend(self._pack_u16(value))
         return bytes(payload)
 
+    def _selected_strip_channel_count(self) -> int:
+        return STRIP_TYPE_CHOICES.get(self._verifier_strip_type_var.get(), 4)
+
+    def _selected_cube_output_channel_count(self) -> int:
+        if self.verifier_lut is None or self.verifier_lut_channel_count is None:
+            raise RuntimeError("Load a LUT before resolving cube output type.")
+        selected = CUBE_OUTPUT_TYPE_CHOICES.get(self._verifier_cube_output_type_var.get(), 0)
+        if selected == 0:
+            return self.verifier_lut_channel_count
+        if selected > self.verifier_lut_channel_count:
+            raise RuntimeError(
+                f"Selected cube output type requires {selected} channels, "
+                f"but loaded cube only has {self.verifier_lut_channel_count}."
+            )
+        return selected
+
+    def _validate_output_family(self, output_channels: int, strip_channels: int) -> None:
+        if output_channels < 3:
+            raise RuntimeError(f"Cube output type must have at least RGB channels, got {output_channels}.")
+        if output_channels > 5:
+            raise RuntimeError(
+                f"Loaded cube has {output_channels} output channels. "
+                "The GUI currently supports RGB, RGBW, and RGBWW/RGBCCT transport only."
+            )
+        if output_channels > strip_channels:
+            raise RuntimeError(
+                f"Selected strip type has {strip_channels} channels, but cube output has {output_channels}. "
+                "Choose a strip type with enough output channels or load a lower-channel cube."
+            )
+
+    @staticmethod
+    def _expand_output_channels(values: tuple[int, ...] | list[int], output_channels: int) -> tuple[int, int, int, int, int]:
+        if len(values) < output_channels:
+            raise RuntimeError(f"LUT lookup returned {len(values)} channels, expected {output_channels}.")
+        channels = [max(0, min(65535, int(values[i]))) for i in range(output_channels)]
+        while len(channels) < 5:
+            channels.append(0)
+        return channels[0], channels[1], channels[2], channels[3], channels[4]
+
+    def _set_output_mode_for_strip_wait(self, strip_channels: int, timeout_s: float = 1.0) -> dict[str, object] | None:
+        mode_id = OUTPUT_MODE_RGB if strip_channels == 3 else OUTPUT_MODE_RGBW if strip_channels == 4 else OUTPUT_MODE_RGBWW
+        msg = self._send_cal_request_wait(bytes([OP_SET_OUTPUT_MODE, mode_id & 0xFF]), OP_SET_OUTPUT_MODE, timeout_s=timeout_s)
+        if msg is None:
+            raise RuntimeError("no response to OP_SET_OUTPUT_MODE")
+        status = int(msg.get("status", 255))
+        if status != STATUS_OK:
+            raise RuntimeError(f"OP_SET_OUTPUT_MODE failed for selected strip type: {_status_name(status)}")
+        self.root.after(0, lambda m=dict(msg): self._apply_device_mode_status(m))
+        return msg
+
+    def _send_output_channels_direct(self, values: tuple[int, int, int, int, int], strip_channels: int, timeout_s: float = 0.8) -> dict[str, object] | None:
+        r16, g16, b16, w16, w2_16 = values
+        if strip_channels >= 5:
+            msg = self._send_cal_request_wait(self._build_direct_rgbww16_payload([r16, g16, b16, w16, w2_16]), OP_SET_DIRECT_RGBWW16, timeout_s=timeout_s)
+            if isinstance(msg, dict) and int(msg.get("status", 255)) == STATUS_OK:
+                return msg
+            status = msg.get("status") if isinstance(msg, dict) else None
+            raise RuntimeError(f"temporal direct RGBWW16 failed: {_status_name(status)}")
+        return self._send_rgbw16_direct_or_fill16([r16, g16, b16, w16], timeout_s=timeout_s)
+
     def _build_output_mode_payload(self) -> bytes:
         mode_name = self._device_output_mode_var.get()
         mode_id = OUTPUT_MODE_CHOICES.get(mode_name, OUTPUT_MODE_RGBW)
         return bytes([OP_SET_OUTPUT_MODE, mode_id & 0xFF])
 
+    def _fastled_input_gamut_id_for_selection(self) -> int:
+        gamut_name = self._verifier_gamut_var.get().strip().lower()
+        if gamut_name not in FASTLED_INPUT_GAMUT_CHOICES:
+            raise RuntimeError(
+                f"FastLED analytical input gamut does not support {gamut_name!r}; "
+                "choose summary/native, rec709, rec2020, dci-p3, or dci-p3-d60."
+            )
+        return FASTLED_INPUT_GAMUT_CHOICES[gamut_name]
+
+    def _apply_input_gamut_status(self, msg: dict[str, object]) -> None:
+        if "input_gamut" not in msg:
+            return
+        try:
+            gamut_id = int(msg.get("input_gamut", INPUT_GAMUT_NATIVE))
+            gamut_name = FASTLED_INPUT_GAMUT_NAMES.get(gamut_id, f"gamut{gamut_id}")
+            supported = int(msg.get("supported_input_gamut_bitmask", 0))
+            self._fastled_input_gamut_status_var.set(
+                f"FastLED input gamut: {gamut_name}  supported=0x{supported:02X}"
+            )
+        except Exception:
+            pass
+
+    def _set_fastled_input_gamut_wait(self, gamut_id: int, timeout_s: float = 1.0) -> dict[str, object]:
+        msg = self._send_cal_request_wait(bytes([OP_SET_INPUT_GAMUT, gamut_id & 0xFF]), OP_SET_INPUT_GAMUT, timeout_s=timeout_s)
+        if msg is None:
+            raise RuntimeError("no response to OP_SET_INPUT_GAMUT")
+        status = int(msg.get("status", 255))
+        if status != STATUS_OK:
+            raise RuntimeError(f"OP_SET_INPUT_GAMUT failed: {_status_name(status)}")
+        self.root.after(0, lambda m=dict(msg): self._apply_input_gamut_status(m))
+        return msg
+
+    def fetch_fastled_input_gamut_async(self) -> None:
+        if not self.device.is_connected():
+            messagebox.showerror("FastLED input gamut", "Connect the Teensy device first.")
+            return
+
+        def worker() -> None:
+            try:
+                msg = self._send_cal_request_wait(bytes([OP_GET_INPUT_GAMUT]), OP_GET_INPUT_GAMUT, timeout_s=1.0)
+                if msg is None:
+                    raise RuntimeError("no response to OP_GET_INPUT_GAMUT")
+                status = int(msg.get("status", 255))
+                if status != STATUS_OK:
+                    raise RuntimeError(f"OP_GET_INPUT_GAMUT failed: {_status_name(status)}")
+                self.root.after(0, lambda m=dict(msg): self._apply_input_gamut_status(m))
+            except Exception as exc:
+                self.log_queue.put(f"[protocol] FastLED input gamut fetch failed: {exc}")
+                self.root.after(0, lambda e=str(exc): messagebox.showerror("FastLED input gamut failed", e))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _send_rgbw16_direct_or_fill16(self, values: list[int] | tuple[int, int, int, int], timeout_s: float = 0.8) -> dict[str, object] | None:
-        msg = self._send_cal_request_wait(self._build_direct_rgbw16_payload(values), OP_SET_DIRECT_RGBW16, timeout_s=timeout_s)
+        msg = self._send_cal_request_wait(self._build_fill16_payload(values), OP_SET_FILL16, timeout_s=timeout_s)
         if isinstance(msg, dict) and int(msg.get("status", 255)) == STATUS_OK:
             return msg
-        try:
-            status = int(msg.get("status", STATUS_BAD_OPCODE)) if isinstance(msg, dict) else STATUS_BAD_OPCODE
-        except Exception:
-            status = STATUS_BAD_OPCODE
-        if msg is None or status == STATUS_BAD_OPCODE:
-            self.log_queue.put("[protocol] OP_SET_DIRECT_RGBW16 unavailable; falling back to OP_SET_FILL16")
-            payload = bytearray([OP_SET_FILL16])
-            for value in values:
-                payload.extend(self._pack_u16(value))
-            self.device.send_frame(KIND_CAL_REQ, bytes(payload))
-            return None
-        raise RuntimeError(f"direct RGBW16 rejected: {_status_name(status)}")
+        status = msg.get("status") if isinstance(msg, dict) else None
+        raise RuntimeError(f"temporal fill16 direct RGBW16 failed: {_status_name(status)}")
 
     def send_output_mode(self) -> None:
         if not self.device.is_connected():
@@ -2274,37 +2469,37 @@ class App:
 
     def send_direct_rgbw16(self) -> None:
         if not self.device.is_connected():
-            messagebox.showerror("Direct RGBW16", "Connect the Teensy device first.")
+            messagebox.showerror("Temporal Fill16", "Connect the Teensy device first.")
             return
         try:
             values = [self.r16_var.get(), self.g16_var.get(), self.b16_var.get(), self.w16_var.get()]
-            msg = self._send_cal_request_wait(self._build_direct_rgbw16_payload(values), OP_SET_DIRECT_RGBW16, timeout_s=1.0)
+            msg = self._send_cal_request_wait(self._build_fill16_payload(values), OP_SET_FILL16, timeout_s=1.0)
             if msg is None:
-                raise RuntimeError("no response to OP_SET_DIRECT_RGBW16 / OP_SET_ANALYTICAL_RGBW16")
+                raise RuntimeError("no response to OP_SET_FILL16")
             status = int(msg.get("status", 255))
             if status != STATUS_OK:
-                raise RuntimeError(f"direct RGBW16 failed: {_status_name(status)}")
+                raise RuntimeError(f"temporal fill16 direct RGBW16 failed: {_status_name(status)}")
             self._apply_device_mode_status(msg)
         except Exception as exc:
-            self.log_queue.put(f"[protocol] direct RGBW16 failed: {exc}")
-            messagebox.showerror("Direct RGBW16 failed", str(exc))
+            self.log_queue.put(f"[protocol] temporal fill16 direct RGBW16 failed: {exc}")
+            messagebox.showerror("Temporal Fill16 failed", str(exc))
 
     def send_direct_rgbww16(self) -> None:
         if not self.device.is_connected():
-            messagebox.showerror("Direct RGBWW16", "Connect the Teensy device first.")
+            messagebox.showerror("Temporal Direct RGBWW16", "Connect the Teensy device first.")
             return
         try:
             values = [self.r16_var.get(), self.g16_var.get(), self.b16_var.get(), self.w16_var.get(), self.w2_16_var.get()]
             msg = self._send_cal_request_wait(self._build_direct_rgbww16_payload(values), OP_SET_DIRECT_RGBWW16, timeout_s=1.0)
             if msg is None:
-                raise RuntimeError("no response to OP_SET_DIRECT_RGBWW16 / OP_SET_ANALYTICAL_RGBWW16")
+                raise RuntimeError("no response to OP_SET_DIRECT_RGBWW16")
             status = int(msg.get("status", 255))
             if status != STATUS_OK:
-                raise RuntimeError(f"direct RGBWW16 failed: {_status_name(status)}")
+                raise RuntimeError(f"temporal direct RGBWW16 failed: {_status_name(status)}")
             self._apply_device_mode_status(msg)
         except Exception as exc:
-            self.log_queue.put(f"[protocol] direct RGBWW16 failed: {exc}")
-            messagebox.showerror("Direct RGBWW16 failed", str(exc))
+            self.log_queue.put(f"[protocol] temporal direct RGBWW16 failed: {exc}")
+            messagebox.showerror("Temporal Direct RGBWW16 failed", str(exc))
 
     def _build_manual_row(self) -> MeasurementPlanRow:
         mode = self.manual_mode_var.get()
@@ -2386,6 +2581,7 @@ class App:
         if msg.get("type") == "cal_response":
             self.cal_response_queue.put(dict(msg))
             self._apply_device_mode_status(msg)
+            self._apply_input_gamut_status(msg)
             status = _status_name(msg.get("status")) if msg.get("status") is not None else "?"
             self.status_text.set(f"status: cal_response op=0x{int(msg.get('op', 0)):02X} {status}")
         else:
@@ -2940,11 +3136,25 @@ class App:
             state="readonly", width=18,
         )
         source_cb.pack(side="left", padx=2)
+        ttk.Label(opt_row, text="Strip:").pack(side="left", padx=(12, 2))
+        strip_cb = ttk.Combobox(
+            opt_row, textvariable=self._verifier_strip_type_var,
+            values=list(STRIP_TYPE_CHOICES.keys()),
+            state="readonly", width=13,
+        )
+        strip_cb.pack(side="left", padx=2)
+        ttk.Label(opt_row, text="Cube:").pack(side="left", padx=(12, 2))
+        cube_cb = ttk.Combobox(
+            opt_row, textvariable=self._verifier_cube_output_type_var,
+            values=list(CUBE_OUTPUT_TYPE_CHOICES.keys()),
+            state="readonly", width=13,
+        )
+        cube_cb.pack(side="left", padx=2)
         ttk.Label(opt_row, text="Model:").pack(side="left", padx=(12, 2))
         model_cb = ttk.Combobox(
             opt_row, textvariable=self._verifier_analytical_model_var,
             values=list(ANALYTICAL_MODEL_CHOICES.keys()),
-            state="readonly", width=10,
+            state="readonly", width=21,
         )
         model_cb.pack(side="left", padx=2)
         ttk.Label(opt_row, text="Dual edge:").pack(side="left", padx=(12, 2))
@@ -2972,6 +3182,35 @@ class App:
         )
         transfer_cb.pack(side="left", padx=2)
         ttk.Checkbutton(opt_row2, text="Project OOH xy", variable=self._verifier_project_hull_var).pack(side="left", padx=(10, 2))
+        ttk.Button(opt_row2, text="Get FastLED gamut", command=self.fetch_fastled_input_gamut_async).pack(side="left", padx=(10, 2))
+        ttk.Label(opt_row2, textvariable=self._fastled_input_gamut_status_var, anchor="w").pack(side="left", padx=(4, 2), fill="x", expand=True)
+
+        self._verifier_mode_note_var = tk.StringVar(value="")
+        note_row = ttk.Frame(box)
+        note_row.pack(fill="x", pady=(0, 2))
+        ttk.Label(
+            note_row,
+            textvariable=self._verifier_mode_note_var,
+            anchor="w",
+            justify="left",
+            wraplength=1300,
+        ).pack(side="left", padx=(4, 2), fill="x", expand=True)
+
+        def _update_verifier_mode_note(*_):
+            if self._verifier_output_source_var.get() == VERIFIER_OUTPUT_SOURCES[0]:
+                self._verifier_mode_note_var.set(
+                    "3D LUT output selected: interpolation and cube output type apply; analytical model and dual-edge controls are ignored. "
+                    "Cube output channels must fit within the selected strip type."
+                )
+            else:
+                self._verifier_mode_note_var.set(
+                    "FastLED analytical MCU output selected: analytical model and dual-edge policy apply; interpolation is ignored. "
+                    "Target gamut is sent to the Teensy as FastLED input gamut before verification."
+                )
+
+        source_cb.bind("<<ComboboxSelected>>", _update_verifier_mode_note)
+        _update_verifier_mode_note()
+
         def _update_patch_count(*_):
             patches = _generate_verifier_patches(self._verifier_preset_var.get())
             self._verifier_patch_count_var.set(f"{len(patches)} patches")
@@ -3040,13 +3279,21 @@ class App:
             return
         try:
             cube = np.load(path)
-            if cube.ndim != 4 or cube.shape[3] != 4:
-                raise ValueError(f"Expected shape (N,N,N,4), got {cube.shape}")
+            if cube.ndim != 4 or cube.shape[3] < 3:
+                raise ValueError(f"Expected shape (N,N,N,C) with C>=3, got {cube.shape}")
+            if cube.shape[3] > 5:
+                raise ValueError(
+                    f"Loaded cube has {cube.shape[3]} output channels. "
+                    "This GUI currently supports RGB, RGBW, and RGBWW/RGBCCT cubes."
+                )
             if not (cube.shape[0] == cube.shape[1] == cube.shape[2]):
                 raise ValueError(f"LUT cube must be cubic, got {cube.shape[:3]}")
             self.verifier_lut = cube.astype(np.uint16)
+            self.verifier_lut_channel_count = int(cube.shape[3])
             N = cube.shape[0]
-            self._verifier_lut_label.set(f"{Path(path).name}  ({N}³ cube)")
+            channels = self.verifier_lut_channel_count
+            family = "RGB" if channels == 3 else "RGBW" if channels == 4 else "RGBWW/RGBCCT"
+            self._verifier_lut_label.set(f"{Path(path).name}  ({N}³ {family} cube, {channels} channels)")
             self.log_queue.put(f"[verifier] loaded LUT: {path}  shape={cube.shape}  dtype={cube.dtype}")
         except Exception as exc:
             messagebox.showerror("Load LUT failed", str(exc))
@@ -3159,9 +3406,9 @@ class App:
             pass
         return _VERIFIER_D65_XY
 
-    def _verifier_has_rgbw_basis(self) -> bool:
+    def _verifier_has_rgb_basis(self) -> bool:
         basis_data = self.verifier_summary.get("basis_xyz_per_q16", {}) if isinstance(self.verifier_summary, dict) else {}
-        return all(k in basis_data for k in ("r16", "g16", "b16", "w16"))
+        return all(k in basis_data for k in ("r16", "g16", "b16"))
 
     def _measurement_result_to_xyz(self, result: dict[str, object]) -> np.ndarray | None:
         """Extract XYZ from spotread result, accepting either XYZ or xyY output."""
@@ -3224,73 +3471,23 @@ class App:
         threading.Thread(target=worker, daemon=True).start()
 
     def _fetch_teensy_diode_profile_basis(self) -> dict[str, np.ndarray]:
-        """Fetch the compiled FastLED DiodeProfile from the connected Teensy."""
+        """Fetch the active Teensy profile and install it into verifier summary state."""
         msg = self._send_cal_request_wait(bytes([OP_GET_DIODE_PROFILE]), OP_GET_DIODE_PROFILE, timeout_s=2.0)
         if msg is None:
             raise RuntimeError("no response to OP_GET_DIODE_PROFILE")
         if int(msg.get("status", 255)) != 0:
-            raise RuntimeError(f"Teensy returned status={msg.get('status')} for OP_GET_DIODE_PROFILE")
+            raise RuntimeError(f"Teensy returned {_status_name(msg.get('status'))} for OP_GET_DIODE_PROFILE")
         profile = msg.get("diode_profile")
         if not isinstance(profile, dict):
             raise RuntimeError("Teensy response did not include a DiodeProfile payload; update the FastLED verifier sketch")
-        primaries_xy = profile.get("primaries_xy")
-        relative_y = profile.get("relative_y")
-        if not isinstance(primaries_xy, dict) or not isinstance(relative_y, dict):
-            raise RuntimeError("malformed Teensy DiodeProfile payload")
-
-        basis: dict[str, np.ndarray] = {}
-        clean_xy: dict[str, list[float]] = {}
-        max_y: dict[str, float] = {}
-        for ch in "RGBW":
-            xy = primaries_xy[ch]
-            x = float(xy[0])
-            y = float(xy[1])
-            rel_y = float(relative_y[ch])
-            if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(rel_y) and y > 0.0 and rel_y > 0.0):
-                raise RuntimeError(f"invalid Teensy DiodeProfile basis for {ch}: xy=({x},{y}) Y={rel_y}")
-            clean_xy[ch] = [x, y]
-            max_y[ch] = rel_y
-            basis[ch] = _verifier_xyY_to_XYZ((x, y), rel_y)
-
-        ref_x, ref_y = self._verifier_ref_white()
-        self.verifier_summary = {
-            "basis_xyz_per_q16": {
-                "r16": basis["R"].tolist(),
-                "g16": basis["G"].tolist(),
-                "b16": basis["B"].tolist(),
-                "w16": basis["W"].tolist(),
-            },
-            "basis_sanity": {
-                "reference_white_xy": [float(ref_x), float(ref_y)],
-                "basis_source": "teensy_diode_profile",
-                "basis_units": "relative_Y",
-            },
-            "settings": {
-                "target_white_balance_mode": "reference-white",
-                "input_transfer": self._verifier_transfer_var.get(),
-                "gamut": self._verifier_gamut_var.get(),
-            },
-            "primaries_xy": clean_xy,
-            "max_Y": max_y,
-            "reference_white_xy": [float(ref_x), float(ref_y)],
-            "generated_by": "host_calibration_gui_teensy_diode_profile",
-            "generated_at": time.time(),
-        }
-        basis_label = (
-            "Teensy DiodeProfile RGBW basis  "
-            f"R=({clean_xy['R'][0]:.4f},{clean_xy['R'][1]:.4f}) "
-            f"G=({clean_xy['G'][0]:.4f},{clean_xy['G'][1]:.4f}) "
-            f"B=({clean_xy['B'][0]:.4f},{clean_xy['B'][1]:.4f}) "
-            f"W=({clean_xy['W'][0]:.4f},{clean_xy['W'][1]:.4f})"
-        )
-        self.root.after(0, lambda label=basis_label: self._verifier_summary_label.set(label))
-        self.log_queue.put(
-            "[verifier] Teensy DiodeProfile basis loaded: "
-            + " ".join(f"{ch}=({clean_xy[ch][0]:.5f},{clean_xy[ch][1]:.5f}) relY={max_y[ch]:.6f}" for ch in "RGBW")
-        )
-        return basis
+        self._last_teensy_diode_profile = profile
+        return self._install_diode_profile_summary(profile, "teensy_diode_profile")
 
     def _install_diode_profile_summary(self, profile: dict[str, object], source: str) -> dict[str, np.ndarray]:
+        channel_order = profile.get("channel_order")
+        if not isinstance(channel_order, list) or len(channel_order) < 3:
+            raise RuntimeError(f"DiodeProfile channel order {channel_order} is invalid")
+
         primaries_xy = profile.get("primaries_xy")
         relative_y = profile.get("relative_y")
         if not isinstance(primaries_xy, dict) or not isinstance(relative_y, dict):
@@ -3299,7 +3496,9 @@ class App:
         basis: dict[str, np.ndarray] = {}
         clean_xy: dict[str, list[float]] = {}
         max_y: dict[str, float] = {}
-        for ch in "RGBW":
+        for ch in channel_order:
+            if ch not in primaries_xy or ch not in relative_y:
+                raise RuntimeError(f"DiodeProfile is missing channel data for {ch}")
             xy = primaries_xy[ch]
             x = float(xy[0])
             y = float(xy[1])
@@ -3310,18 +3509,29 @@ class App:
             max_y[ch] = rel_y
             basis[ch] = _verifier_xyY_to_XYZ((x, y), rel_y)
 
+        if not all(ch in basis for ch in ("R", "G", "B")):
+            raise RuntimeError("DiodeProfile must include R,G,B channels")
+
         ref_x, ref_y = self._verifier_ref_white()
+        basis_xyz_per_q16 = {
+            "r16": basis["R"].tolist(),
+            "g16": basis["G"].tolist(),
+            "b16": basis["B"].tolist(),
+        }
+        if "W" in basis:
+            basis_xyz_per_q16["w16"] = basis["W"].tolist()
+        if "WW" in basis:
+            basis_xyz_per_q16["ww16"] = basis["WW"].tolist()
+        if "WC" in basis:
+            basis_xyz_per_q16["wc16"] = basis["WC"].tolist()
+
         self.verifier_summary = {
-            "basis_xyz_per_q16": {
-                "r16": basis["R"].tolist(),
-                "g16": basis["G"].tolist(),
-                "b16": basis["B"].tolist(),
-                "w16": basis["W"].tolist(),
-            },
+            "basis_xyz_per_q16": basis_xyz_per_q16,
             "basis_sanity": {
                 "reference_white_xy": [float(ref_x), float(ref_y)],
                 "basis_source": source,
                 "basis_units": "relative_Y",
+                "channel_order": channel_order,
             },
             "settings": {
                 "target_white_balance_mode": "reference-white",
@@ -3330,28 +3540,25 @@ class App:
             },
             "primaries_xy": clean_xy,
             "max_Y": max_y,
+            "channel_order": channel_order,
             "reference_white_xy": [float(ref_x), float(ref_y)],
             "generated_by": f"host_calibration_gui_{source}",
             "generated_at": time.time(),
         }
-        basis_label = (
-            f"{source} RGBW basis  "
-            f"R=({clean_xy['R'][0]:.4f},{clean_xy['R'][1]:.4f}) "
-            f"G=({clean_xy['G'][0]:.4f},{clean_xy['G'][1]:.4f}) "
-            f"B=({clean_xy['B'][0]:.4f},{clean_xy['B'][1]:.4f}) "
-            f"W=({clean_xy['W'][0]:.4f},{clean_xy['W'][1]:.4f})"
+        basis_label = f"{source} basis ({','.join(channel_order)})  " + " ".join(
+            f"{ch}=({clean_xy[ch][0]:.4f},{clean_xy[ch][1]:.4f})" for ch in channel_order
         )
         self.root.after(0, lambda label=basis_label: self._verifier_summary_label.set(label))
         self.log_queue.put(
             f"[verifier] {source} basis loaded: "
-            + " ".join(f"{ch}=({clean_xy[ch][0]:.5f},{clean_xy[ch][1]:.5f}) relY={max_y[ch]:.6f}" for ch in "RGBW")
+            + " ".join(f"{ch}=({clean_xy[ch][0]:.5f},{clean_xy[ch][1]:.5f}) relY={max_y[ch]:.6f}" for ch in channel_order)
         )
         return basis
 
     def _extract_diode_profile_from_summary(self) -> dict[str, object]:
         basis = self._verifier_model_projection_basis_xyz()
         if basis is None:
-            raise RuntimeError("no RGBW basis available; load a summary, fetch a profile, or measure the diode basis first")
+            raise RuntimeError("no basis available; load a summary, fetch a profile, or measure the diode basis first")
         primaries_xy: dict[str, list[float]] = {}
         relative_y: dict[str, float] = {}
         for ch in "RGBW":
@@ -3375,13 +3582,22 @@ class App:
     def _encode_set_diode_profile_payload(self, profile: dict[str, object]) -> bytes:
         primaries_xy = profile.get("primaries_xy")
         relative_y = profile.get("relative_y")
+        channel_order = profile.get("channel_order")
         if not isinstance(primaries_xy, dict) or not isinstance(relative_y, dict):
             raise RuntimeError("profile lacks primaries_xy/relative_y")
+
+        if channel_order == ["R", "G", "B", "WW", "WC"]:
+            format_id = 2
+            channels = ["R", "G", "B", "WW", "WC"]
+        else:
+            format_id = 1
+            channels = list("RGBW")
+
         payload = bytearray([OP_SET_DIODE_PROFILE])
         payload.extend(b"DPRF")
         payload.append(1)
-        payload.append(1)
-        for ch in "RGBW":
+        payload.append(format_id)
+        for ch in channels:
             xy = primaries_xy[ch]
             x = float(xy[0])
             y = float(xy[1])
@@ -3404,7 +3620,16 @@ class App:
         def worker() -> None:
             try:
                 self.root.after(0, lambda: self._verifier_status_var.set("sending DiodeProfile to Teensy"))
-                profile = self._extract_diode_profile_from_summary()
+                selected_model = self._verifier_analytical_model_var.get()
+                if selected_model == "rgbww_overdrive":
+                    profile = self._last_teensy_diode_profile
+                    if not isinstance(profile, dict) or profile.get("channel_order") != ["R", "G", "B", "WW", "WC"]:
+                        raise RuntimeError(
+                            "RGBWW model selected: no RGBWW DiodeProfile payload is available to send. "
+                            "Fetch Teensy DiodeProfile while RGBWW mode is active, or keep using default FastLED RGBWW profile values."
+                        )
+                else:
+                    profile = self._extract_diode_profile_from_summary()
                 payload = self._encode_set_diode_profile_payload(profile)
                 msg = self._send_cal_request_wait(payload, OP_SET_DIODE_PROFILE, timeout_s=2.0)
                 if msg is None:
@@ -3414,6 +3639,7 @@ class App:
                     raise RuntimeError(f"Teensy returned {_status_name(status)} for OP_SET_DIODE_PROFILE")
                 response_profile = msg.get("diode_profile")
                 if isinstance(response_profile, dict):
+                    self._last_teensy_diode_profile = response_profile
                     self._install_diode_profile_summary(response_profile, "teensy_diode_profile_set_response")
                 self.root.after(0, lambda: self._verifier_status_var.set("DiodeProfile sent"))
             except Exception as exc:
@@ -3515,19 +3741,19 @@ class App:
         return basis
 
     def _ensure_verifier_basis_for_expected_xy(self) -> None:
-        """Fetch or measure RGBW basis when no summary/basis is available."""
-        if self._verifier_has_rgbw_basis():
+        """Fetch or measure basis when no summary/basis is available."""
+        if self._verifier_has_rgb_basis():
             return
         if self.device.is_connected():
             try:
-                self.log_queue.put("[verifier] no RGBW summary basis available; fetching Teensy DiodeProfile")
+                self.log_queue.put("[verifier] no summary basis available; fetching Teensy DiodeProfile")
                 self._fetch_teensy_diode_profile_basis()
                 return
             except Exception as exc:
                 self.log_queue.put(f"[verifier] Teensy DiodeProfile fallback unavailable: {exc}")
         if not bool(self._verifier_auto_measure_basis_var.get()):
             return
-        self.log_queue.put("[verifier] no RGBW summary/profile basis available; auto-measuring full-drive R/G/B/W")
+        self.log_queue.put("[verifier] no summary/profile basis available; auto-measuring full-drive R/G/B/W")
         self._measure_verifier_rgbw_basis()
 
     def _verifier_expected_xy_from_summary(self, r16: int, g16: int, b16: int) -> tuple[float, float] | None:
@@ -3575,7 +3801,7 @@ class App:
         return np.asarray(pts, dtype=float)
 
     def _verifier_model_projection_basis_xyz(self) -> dict[str, np.ndarray] | None:
-        """Return RGBW basis XYZ for model-style expected-xy projection.
+        """Return RGBW-like basis XYZ for model-style expected-xy projection.
 
         Preferred source is basis_xyz_per_q16 when it includes w16.  Model LUT
         summaries may instead provide primaries_xy + max_Y, so support that too.
@@ -3584,12 +3810,30 @@ class App:
         without W.
         """
         basis_data = self.verifier_summary.get("basis_xyz_per_q16", {})
+        if not all(k in basis_data for k in ("r16", "g16", "b16")):
+            return None
+
         key_map = {"R": "r16", "G": "g16", "B": "b16", "W": "w16"}
         if all(k in basis_data for k in key_map.values()):
             try:
                 return {
                     ch: np.array(basis_data[key], dtype=float)
                     for ch, key in key_map.items()
+                }
+            except Exception:
+                return None
+
+        # RGBWW basis: synthesize an effective W as average of WW and WC for
+        # RGBW-style model projection helpers.
+        if all(k in basis_data for k in ("ww16", "wc16")):
+            try:
+                ww = np.array(basis_data["ww16"], dtype=float)
+                wc = np.array(basis_data["wc16"], dtype=float)
+                return {
+                    "R": np.array(basis_data["r16"], dtype=float),
+                    "G": np.array(basis_data["g16"], dtype=float),
+                    "B": np.array(basis_data["b16"], dtype=float),
+                    "W": 0.5 * (ww + wc),
                 }
             except Exception:
                 return None
@@ -3601,6 +3845,19 @@ class App:
                 return {
                     ch: _verifier_xyY_to_XYZ(tuple(prim_xy[ch]), float(max_y[ch]))
                     for ch in "RGBW"
+                }
+            except Exception:
+                return None
+
+        if all(ch in prim_xy and ch in max_y for ch in ("R", "G", "B", "WW", "WC")):
+            try:
+                ww = _verifier_xyY_to_XYZ(tuple(prim_xy["WW"]), float(max_y["WW"]))
+                wc = _verifier_xyY_to_XYZ(tuple(prim_xy["WC"]), float(max_y["WC"]))
+                return {
+                    "R": _verifier_xyY_to_XYZ(tuple(prim_xy["R"]), float(max_y["R"])),
+                    "G": _verifier_xyY_to_XYZ(tuple(prim_xy["G"]), float(max_y["G"])),
+                    "B": _verifier_xyY_to_XYZ(tuple(prim_xy["B"]), float(max_y["B"])),
+                    "W": 0.5 * (ww + wc),
                 }
             except Exception:
                 return None
@@ -3689,6 +3946,22 @@ class App:
         if self.verifier_running:
             messagebox.showinfo("LUT Verifier", "Verification is already running.")
             return
+        strip_channels = self._selected_strip_channel_count()
+        cube_output_channels: int | None = None
+        if using_lut:
+            try:
+                cube_output_channels = self._selected_cube_output_channel_count()
+                self._validate_output_family(cube_output_channels, strip_channels)
+            except Exception as exc:
+                messagebox.showerror("LUT output type", str(exc))
+                return
+        fastled_input_gamut_id: int | None = None
+        if not using_lut:
+            try:
+                fastled_input_gamut_id = self._fastled_input_gamut_id_for_selection()
+            except Exception as exc:
+                messagebox.showerror("FastLED input gamut", str(exc))
+                return
 
         # Reset results display
         self.verifier_results.clear()
@@ -3700,6 +3973,11 @@ class App:
         def worker() -> None:
             self.verifier_running = True
             de_threshold = float(self._verifier_de_var.get())
+            self._set_output_mode_for_strip_wait(strip_channels, timeout_s=1.0)
+            if fastled_input_gamut_id is not None:
+                msg = self._set_fastled_input_gamut_wait(fastled_input_gamut_id, timeout_s=1.0)
+                gamut_name = FASTLED_INPUT_GAMUT_NAMES.get(int(msg.get("input_gamut", fastled_input_gamut_id)), str(fastled_input_gamut_id))
+                self.log_queue.put(f"[verifier] FastLED input gamut set to {gamut_name}")
             self._ensure_verifier_basis_for_expected_xy()
             ref_x, ref_y = self._verifier_ref_white()
             patches = _generate_verifier_patches(self._verifier_preset_var.get())
@@ -3722,11 +4000,13 @@ class App:
                     strict_tuple = None
                     lp_tuple = None
 
-                    # --- Resolve RGBW output ---
+                    # --- Resolve output channels ---
                     if using_lut_row:
-                        lr, lg, lb, lw = _lut_lookup(self.verifier_lut, r16, g16, b16, self._verifier_interp_var.get())  # type: ignore[arg-type]
+                        raw_output = _lut_lookup(self.verifier_lut, r16, g16, b16, self._verifier_interp_var.get())  # type: ignore[arg-type]
+                        output_count = cube_output_channels if cube_output_channels is not None else len(raw_output)
+                        lr, lg, lb, lw, lw2 = self._expand_output_channels(raw_output, output_count)
                     else:
-                        model_id = ANALYTICAL_MODEL_CHOICES.get(analytical_model, ANALYTICAL_MODEL_SUB_GAMUT)
+                        model_id = ANALYTICAL_MODEL_CHOICES.get(analytical_model, ANALYTICAL_MODEL_RGBW_STRICT_SUB_GAMUT)
                         dual_edge_policy_id = DUAL_EDGE_POLICY_CHOICES.get(
                             analytical_dual_edge_policy,
                             DUAL_EDGE_POLICY_Y_CORRECT_CLIP,
@@ -3739,9 +4019,14 @@ class App:
                         if not isinstance(cal_msg, dict) or cal_msg.get("status") != 0:
                             status = cal_msg.get("status") if isinstance(cal_msg, dict) else None
                             raise RuntimeError(f"analytical MCU solve failed status={_status_name(status)}")
+                        solved_channels = cal_msg.get("solved_channels16") if isinstance(cal_msg, dict) else None
                         solved = cal_msg.get("solved_rgbw16") if isinstance(cal_msg, dict) else None
-                        if isinstance(solved, list) and len(solved) == 4:
+                        if isinstance(solved_channels, list) and len(solved_channels) >= 4:
+                            lr, lg, lb, lw = [int(v) for v in solved_channels[:4]]
+                            lw2 = int(solved_channels[4]) if len(solved_channels) >= 5 else 0
+                        elif isinstance(solved, list) and len(solved) == 4:
                             lr, lg, lb, lw = [int(v) for v in solved]
+                            lw2 = int(cal_msg.get("last_solved_w2_16", 0)) if isinstance(cal_msg, dict) else 0
                         else:
                             raise RuntimeError("analytical MCU response did not include solved_rgbw16")
                         solve_path = ANALYTICAL_SOLVE_PATHS.get(int(cal_msg.get("analytical_solve_path", -1)), "unknown")
@@ -3751,17 +4036,17 @@ class App:
                         )
                         strict_tuple = cal_msg.get("analytical_strict_rgbw16")
                         lp_tuple = cal_msg.get("analytical_lp_rgbw16")
-                    w_total = lr + lg + lb + lw
-                    w_pct = (lw / w_total * 100.0) if w_total > 0 else 0.0
+                    w_total = lr + lg + lb + lw + lw2
+                    w_pct = ((lw + lw2) / w_total * 100.0) if w_total > 0 else 0.0
 
                     # Insert placeholder row while measuring
                     iid = f"vrow_{idx}"
                     self.root.after(0, lambda i=iid, n=name, r=r16, g=g16, b=b16,
-                                    lr_=lr, lg_=lg, lb_=lb, lw_=lw, wp=w_pct:
+                                    lr_=lr, lg_=lg, lb_=lb, lw_=lw, lw2_=lw2, wp=w_pct:
                                     self._vtree.insert(
                                         "", "end", iid=i,
                                         values=(n, f"{r}/{g}/{b}",
-                                                f"{lr_}/{lg_}/{lb_}/{lw_}",
+                                                f"{lr_}/{lg_}/{lb_}/{lw_}" + (f"/{lw2_}" if lw2_ > 0 else ""),
                                                 "...",
                                             "...", "...",
                                                 f"{wp:.1f}%",
@@ -3773,7 +4058,7 @@ class App:
 
                     # --- Send RGBW fill16, unless the analytical opcode already rendered it ---
                     if using_lut_row:
-                        self._send_rgbw16_direct_or_fill16([lr, lg, lb, lw], timeout_s=0.8)
+                        self._send_output_channels_direct((lr, lg, lb, lw, lw2), strip_channels, timeout_s=0.8)
                         time.sleep(self.settle_delay_var.get())
                     else:
                         time.sleep(self.settle_delay_var.get())
@@ -3818,12 +4103,16 @@ class App:
                     row_data = {
                         "patch":    name,
                         "r16": r16, "g16": g16, "b16": b16,
-                        "lut_r16": lr, "lut_g16": lg, "lut_b16": lb, "lut_w16": lw,
+                        "lut_r16": lr, "lut_g16": lg, "lut_b16": lb, "lut_w16": lw, "lut_w2_16": lw2,
                         "output_source": output_source,
                         "active_output_mode": cal_msg.get("active_output_mode") if isinstance(cal_msg, dict) else None,
                         "supported_output_mode_bitmask": cal_msg.get("supported_output_mode_bitmask") if isinstance(cal_msg, dict) else None,
                         "physical_output_channel_count": cal_msg.get("physical_output_channel_count") if isinstance(cal_msg, dict) else None,
                         "active_logical_channel_count": cal_msg.get("active_logical_channel_count") if isinstance(cal_msg, dict) else None,
+                        "selected_strip_type": self._verifier_strip_type_var.get(),
+                        "selected_strip_channel_count": strip_channels,
+                        "selected_cube_output_type": self._verifier_cube_output_type_var.get() if using_lut_row else "",
+                        "selected_cube_output_channel_count": cube_output_channels if using_lut_row else None,
                         "last_input_w16": cal_msg.get("last_input_w16") if isinstance(cal_msg, dict) else None,
                         "last_input_w2_16": cal_msg.get("last_input_w2_16") if isinstance(cal_msg, dict) else None,
                         "last_solved_w2_16": cal_msg.get("last_solved_w2_16") if isinstance(cal_msg, dict) else None,
@@ -3839,6 +4128,7 @@ class App:
                         "mcu_solved_g16": lg if not using_lut_row else None,
                         "mcu_solved_b16": lb if not using_lut_row else None,
                         "mcu_solved_w16": lw if not using_lut_row else None,
+                        "mcu_solved_w2_16": lw2 if not using_lut_row else None,
                         "w_pct":    w_pct,
                         "meas_x":   mx,  "meas_y": my, "meas_Y": mY,
                         "exp_raw_x": exp_raw_xy[0] if exp_raw_xy else None,  # type: ignore[index]
@@ -3878,7 +4168,7 @@ class App:
                         self._vtree.item(i, values=(
                             rd["patch"],
                             f"{rd['r16']}/{rd['g16']}/{rd['b16']}",
-                            f"{rd['lut_r16']}/{rd['lut_g16']}/{rd['lut_b16']}/{rd['lut_w16']}",
+                            f"{rd['lut_r16']}/{rd['lut_g16']}/{rd['lut_b16']}/{rd['lut_w16']}" + (f"/{rd['lut_w2_16']}" if int(rd.get('lut_w2_16') or 0) > 0 else ""),
                             rd.get("analytical_solve_path", ""),
                             rd.get("analytical_strict_rgbw16", ""),
                             rd.get("analytical_lp_rgbw16", ""),
@@ -3910,7 +4200,7 @@ class App:
                         f"transfer={self._verifier_transfer_var.get()} "
                         f"project_hull={int(self._verifier_project_hull_var.get())} "
                         f"ref=({ref_x:.4f},{ref_y:.4f}) "
-                        f"W={lw} ({w_pct:.1f}%)  {xy_str}{de_str}  [{ok_str}]"
+                        f"W={(lw + lw2)} ({w_pct:.1f}%)  {xy_str}{de_str}  [{ok_str}]"
                     )
 
             finally:
@@ -3965,9 +4255,11 @@ class App:
             return
         fieldnames = [
             "patch", "r16", "g16", "b16",
-            "lut_r16", "lut_g16", "lut_b16", "lut_w16", "w_pct",
+            "lut_r16", "lut_g16", "lut_b16", "lut_w16", "lut_w2_16", "w_pct",
             "output_source", "active_output_mode", "supported_output_mode_bitmask",
             "physical_output_channel_count", "active_logical_channel_count",
+            "selected_strip_type", "selected_strip_channel_count",
+            "selected_cube_output_type", "selected_cube_output_channel_count",
             "last_input_w16", "last_input_w2_16", "last_solved_w2_16",
             "fold_stub_flag", "response_extension_version",
             "analytical_model",
@@ -3975,6 +4267,7 @@ class App:
             "analytical_solve_path",
             "analytical_strict_ok", "analytical_strict_rgbw16", "analytical_lp_rgbw16",
             "mcu_solved_r16", "mcu_solved_g16", "mcu_solved_b16", "mcu_solved_w16",
+            "mcu_solved_w2_16",
             "meas_x", "meas_y", "meas_Y",
             "exp_raw_x", "exp_raw_y",
             "exp_x", "exp_y",

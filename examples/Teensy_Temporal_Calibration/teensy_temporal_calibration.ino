@@ -46,7 +46,6 @@
 #define OP_SET_TEMPORAL_BLEND 0x2A
 #define OP_SET_FILL16 0x2B
 #define OP_SET_OUTPUT_MODE 0x2E
-#define OP_SET_DIRECT_RGBW16 0x2F
 #define OP_SET_DIRECT_RGBWW16 0x30
 #define PHASE_MODE_AUTO 0x00
 #define PHASE_MODE_MANUAL 0x01
@@ -424,10 +423,6 @@ void handleCalFrame(const uint8_t* payload, uint16_t payloadLen) {
       else if (!setOutputMode(payload[1])) status = STATUS_UNSUPPORTED_OUTPUT_MODE;
       break;
     case OP_SET_FILL16:
-      if (payloadLen < 9) status = STATUS_BAD_PAYLOAD;
-      else if (!fillAll16(readU16(payload, 1), readU16(payload, 3), readU16(payload, 5), readU16(payload, 7))) status = STATUS_UNSUPPORTED_OUTPUT_MODE;
-      break;
-    case OP_SET_DIRECT_RGBW16:
       if (payloadLen < 9) status = STATUS_BAD_PAYLOAD;
       else if (!fillAll16(readU16(payload, 1), readU16(payload, 3), readU16(payload, 5), readU16(payload, 7))) status = STATUS_UNSUPPORTED_OUTPUT_MODE;
       break;

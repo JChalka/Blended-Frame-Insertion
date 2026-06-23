@@ -6,6 +6,7 @@
 #define FASTLED_RGBW_COLORIMETRIC 1
 #endif
 #include <FastLED.h>
+#include <fl/gfx/rgbww.h>
 #include <fl/gfx/rgbw_colorimetric.h>
 
 #define USER_DEFINED_TEMPORAL_SOLVER_HEADER
@@ -54,13 +55,20 @@
 #define OP_SET_ANALYTICAL_RGBW16 0x2F
 #define OP_SET_ANALYTICAL_RGBWW16 0x30
 #define OP_SET_DIODE_PROFILE 0x31
+#define OP_GET_INPUT_GAMUT 0x32
+#define OP_SET_INPUT_GAMUT 0x33
 #define PHASE_MODE_AUTO 0x00
 #define PHASE_MODE_MANUAL 0x01
 #define OUTPUT_MODE_RGB 0x00
 #define OUTPUT_MODE_RGBW 0x01
 #define OUTPUT_MODE_RGBWW 0x02
-#define ANALYTICAL_MODEL_SUB_GAMUT 0x00
-#define ANALYTICAL_MODEL_LP_LEGACY 0x01
+#define ANALYTICAL_MODEL_RGBW_STRICT_SUB_GAMUT 0x00
+#define ANALYTICAL_MODEL_RGBW_LP_LEGACY 0x01
+#define ANALYTICAL_MODEL_RGBWW_OVERDRIVE 0x02
+#define ANALYTICAL_MODEL_RGB_DIRECT_STUB 0x03
+#define ANALYTICAL_MODEL_RGBWW_STRICT_STUB 0x04
+#define ANALYTICAL_MODEL_SUB_GAMUT ANALYTICAL_MODEL_RGBW_STRICT_SUB_GAMUT
+#define ANALYTICAL_MODEL_LP_LEGACY ANALYTICAL_MODEL_RGBW_LP_LEGACY
 #define DUAL_EDGE_POLICY_Y_CORRECT_CLIP 0x00
 #define DUAL_EDGE_POLICY_ROLLOFF_AFTER_CLIP 0x01
 #define DUAL_EDGE_POLICY_SCALE_TO_FULL_ENDPOINT 0x02
@@ -68,12 +76,23 @@
 #define ANALYTICAL_SOLVE_STRICT_SUB_GAMUT 0x01
 #define ANALYTICAL_SOLVE_LP_LEGACY 0x02
 #define ANALYTICAL_SOLVE_STRICT_FAILED 0x03
+#define ANALYTICAL_SOLVE_RGBWW_OVERDRIVE 0x04
+#define ANALYTICAL_SOLVE_UNAVAILABLE 0x05
 #define STATUS_OK 0x00
 #define STATUS_BAD_PAYLOAD 0x01
 #define STATUS_BAD_OPCODE 0x02
 #define STATUS_SOLVE_FAILED 0x03
 #define STATUS_UNSUPPORTED_OUTPUT_MODE 0x04
 #define STATUS_BAD_PROFILE 0x05
+#define STATUS_UNSUPPORTED_MODEL 0x06
+#define STATUS_UNSUPPORTED_GAMUT 0x07
+#define DIODE_PROFILE_FORMAT_RGBW 0x01
+#define DIODE_PROFILE_FORMAT_RGBWW 0x02
+#define INPUT_GAMUT_NATIVE 0x00
+#define INPUT_GAMUT_REC709 0x01
+#define INPUT_GAMUT_REC2020 0x02
+#define INPUT_GAMUT_DCI_P3_D65 0x03
+#define INPUT_GAMUT_DCI_P3_D60 0x04
 
 const uint8_t ledPins[NUM_PINS] = {5, 21};
 
@@ -91,6 +110,7 @@ uint8_t outputMode = OUTPUT_MODE_RGBW;
 uint8_t analyticalModel = ANALYTICAL_MODEL_SUB_GAMUT;
 uint8_t analyticalSolvePath = ANALYTICAL_SOLVE_NONE;
 uint8_t analyticalDualEdgePolicy = DUAL_EDGE_POLICY_Y_CORRECT_CLIP;
+uint8_t activeInputGamut = INPUT_GAMUT_NATIVE;
 uint32_t temporalTick = 0;
 ObjectFLED leds(LED_COUNT, displayBuffer, CORDER_GRBW, NUM_PINS, ledPins, 0);
 
@@ -141,6 +161,26 @@ float activeDiodeProfileRelY[4] = {
   DIODE_PROFILE_REL_Y[2],
   DIODE_PROFILE_REL_Y[3],
 };
+
+// RGBWW profile transport shape: R,G,B,WW,WC each with x,y,relative_Y.
+float activeRgbwwProfileXY[5][2] = {
+  {0.700606f, 0.299300f},
+  {0.097940f, 0.831593f},
+  {0.129086f, 0.049450f},
+  {0.460000f, 0.410700f},
+  {0.313500f, 0.323700f},
+};
+
+float activeRgbwwProfileRelY[5] = {
+  0.10f,
+  0.37f,
+  0.08f,
+  1.00f,
+  1.00f,
+};
+
+fl::colorimetric_detail::RgbcctProfile activeRgbwwProfile = fl::kRgbwwDefaultProfile;
+bool hasActiveRgbwwProfile = false;
 
 fl::DiodeProfile testBenchRgbwProfile = {
   {DIODE_PROFILE_XY[0][0], DIODE_PROFILE_XY[0][1]},
@@ -243,6 +283,14 @@ static inline uint16_t clampQ16FromFloat(float value) {
   return (uint16_t)(value * 65535.0f + 0.5f);
 }
 
+static inline uint8_t q16ToU8(uint16_t valueQ16) {
+  return (uint8_t)(((uint32_t)valueQ16 * 255u + 32767u) / 65535u);
+}
+
+static inline uint16_t u8ToQ16(uint8_t value) {
+  return (uint16_t)value * 257u;
+}
+
 static inline void normalizeTemporalTick() {
   temporalTick %= (uint32_t)TEMPORAL_BFI_CYCLE;
 }
@@ -261,6 +309,30 @@ fl::RgbwColorimetricDualEdgePolicy fastLedDualEdgePolicy(uint8_t policy) {
     default:
       return fl::RgbwColorimetricDualEdgePolicy::YCorrectClip;
   }
+}
+
+fl::InputGamut fastLedInputGamut(uint8_t gamut) {
+  switch (gamut) {
+    case INPUT_GAMUT_REC709:
+      return fl::InputGamut::Rec709;
+    case INPUT_GAMUT_REC2020:
+      return fl::InputGamut::Rec2020;
+    case INPUT_GAMUT_DCI_P3_D65:
+      return fl::InputGamut::DciP3D65;
+    case INPUT_GAMUT_DCI_P3_D60:
+      return fl::InputGamut::DciP3D60;
+    case INPUT_GAMUT_NATIVE:
+    default:
+      return fl::InputGamut::Native;
+  }
+}
+
+static inline bool inputGamutSupported(uint8_t gamut) {
+  return gamut <= INPUT_GAMUT_DCI_P3_D60;
+}
+
+static inline uint8_t supportedInputGamutMask() {
+  return 0x1F;
 }
 
 static void clearAnalyticalDebug();
@@ -341,45 +413,180 @@ static void rebuildDiodeProfileCache() {
     activeDiodeProfileRelY[3],
     0,
   };
-  fl::set_input_gamut(&testBenchRgbwProfile, fl::InputGamut::Native);
+  fl::set_input_gamut(&testBenchRgbwProfile, fastLedInputGamut(activeInputGamut));
   fl::set_rgbw_colorimetric_profile(&testBenchRgbwProfile);
   fl::colorimetric_detail::build_profile_cache(&testBenchRgbwProfile, &analyticalCache);
+}
+
+static void rebuildRgbwwProfileCache() {
+  activeRgbwwProfile = fl::kRgbwwDefaultProfile;
+
+  activeRgbwwProfile.warm_path.lum_r = activeRgbwwProfileRelY[0];
+  activeRgbwwProfile.warm_path.lum_g = activeRgbwwProfileRelY[1];
+  activeRgbwwProfile.warm_path.lum_b = activeRgbwwProfileRelY[2];
+  activeRgbwwProfile.cool_path.lum_r = activeRgbwwProfileRelY[0];
+  activeRgbwwProfile.cool_path.lum_g = activeRgbwwProfileRelY[1];
+  activeRgbwwProfile.cool_path.lum_b = activeRgbwwProfileRelY[2];
+
+  activeRgbwwProfile.warm_path.xy_r[0] = activeRgbwwProfileXY[0][0];
+  activeRgbwwProfile.warm_path.xy_r[1] = activeRgbwwProfileXY[0][1];
+  activeRgbwwProfile.warm_path.xy_g[0] = activeRgbwwProfileXY[1][0];
+  activeRgbwwProfile.warm_path.xy_g[1] = activeRgbwwProfileXY[1][1];
+  activeRgbwwProfile.warm_path.xy_b[0] = activeRgbwwProfileXY[2][0];
+  activeRgbwwProfile.warm_path.xy_b[1] = activeRgbwwProfileXY[2][1];
+  activeRgbwwProfile.warm_path.xy_w[0] = activeRgbwwProfileXY[3][0];
+  activeRgbwwProfile.warm_path.xy_w[1] = activeRgbwwProfileXY[3][1];
+  activeRgbwwProfile.warm_path.lum_w = activeRgbwwProfileRelY[3];
+
+  activeRgbwwProfile.cool_path.xy_r[0] = activeRgbwwProfileXY[0][0];
+  activeRgbwwProfile.cool_path.xy_r[1] = activeRgbwwProfileXY[0][1];
+  activeRgbwwProfile.cool_path.xy_g[0] = activeRgbwwProfileXY[1][0];
+  activeRgbwwProfile.cool_path.xy_g[1] = activeRgbwwProfileXY[1][1];
+  activeRgbwwProfile.cool_path.xy_b[0] = activeRgbwwProfileXY[2][0];
+  activeRgbwwProfile.cool_path.xy_b[1] = activeRgbwwProfileXY[2][1];
+  activeRgbwwProfile.cool_path.xy_w[0] = activeRgbwwProfileXY[4][0];
+  activeRgbwwProfile.cool_path.xy_w[1] = activeRgbwwProfileXY[4][1];
+  activeRgbwwProfile.cool_path.lum_w = activeRgbwwProfileRelY[4];
+
+  fl::set_input_gamut(&activeRgbwwProfile.warm_path, fastLedInputGamut(activeInputGamut));
+  fl::set_input_gamut(&activeRgbwwProfile.cool_path, fastLedInputGamut(activeInputGamut));
+
+  fl::set_rgbww_colorimetric_profile(&activeRgbwwProfile);
+  hasActiveRgbwwProfile = true;
+}
+
+static bool setInputGamut(uint8_t gamut) {
+  if (!inputGamutSupported(gamut)) return false;
+  activeInputGamut = gamut;
+  rebuildDiodeProfileCache();
+  rebuildRgbwwProfileCache();
+  clearAnalyticalDebug();
+  return true;
+}
+
+void sendInputGamutResponse(uint8_t op, uint8_t status) {
+  uint8_t payload[5] = {0};
+  payload[0] = op;
+  payload[1] = status;
+  payload[2] = activeInputGamut;
+  payload[3] = supportedInputGamutMask();
+  payload[4] = 1;  // response extension version
+  sendFrame(FRAME_KIND_CAL_RSP, payload, sizeof(payload));
 }
 
 static bool setDiodeProfileFromPayload(const uint8_t* payload, uint16_t payloadLen) {
   // Payload after opcode:
   // ['D','P','R','F',version=1,format=1, 12x u32be q1e6]
   // Channel order is R,G,B,W; each channel stores x, y, relative_Y.
-  if (payloadLen < 55) return false;
+  if (payloadLen < 7) return false;
   if (payload[1] != 'D' || payload[2] != 'P' || payload[3] != 'R' || payload[4] != 'F') return false;
-  if (payload[5] != 1 || payload[6] != 1) return false;
+  if (payload[5] != 1) return false;
 
-  float xy[4][2];
-  float relY[4];
-  uint8_t offset = 7;
-  for (uint8_t i = 0; i < 4; ++i) {
-    xy[i][0] = floatFromQ1e6(readU32BE(payload, offset)); offset += 4;
-    xy[i][1] = floatFromQ1e6(readU32BE(payload, offset)); offset += 4;
-    relY[i] = floatFromQ1e6(readU32BE(payload, offset)); offset += 4;
+  const uint8_t format = payload[6];
 
-    if (!(xy[i][0] > 0.0f) || !(xy[i][0] < 1.0f)) return false;
-    if (!(xy[i][1] > 0.0f) || !(xy[i][1] < 1.0f)) return false;
-    if ((xy[i][0] + xy[i][1]) >= 1.0f) return false;
-    if (!(relY[i] > 0.0f)) return false;
+  if (format == DIODE_PROFILE_FORMAT_RGBW) {
+    if (payloadLen < 55) return false;
+
+    float xy[4][2];
+    float relY[4];
+    uint8_t offset = 7;
+    for (uint8_t i = 0; i < 4; ++i) {
+      xy[i][0] = floatFromQ1e6(readU32BE(payload, offset)); offset += 4;
+      xy[i][1] = floatFromQ1e6(readU32BE(payload, offset)); offset += 4;
+      relY[i] = floatFromQ1e6(readU32BE(payload, offset)); offset += 4;
+
+      if (!(xy[i][0] > 0.0f) || !(xy[i][0] < 1.0f)) return false;
+      if (!(xy[i][1] > 0.0f) || !(xy[i][1] < 1.0f)) return false;
+      if ((xy[i][0] + xy[i][1]) >= 1.0f) return false;
+      if (!(relY[i] > 0.0f)) return false;
+    }
+
+    for (uint8_t i = 0; i < 4; ++i) {
+      activeDiodeProfileXY[i][0] = xy[i][0];
+      activeDiodeProfileXY[i][1] = xy[i][1];
+      activeDiodeProfileRelY[i] = relY[i];
+    }
+
+    rebuildDiodeProfileCache();
+    clearAnalyticalDebug();
+    return true;
   }
 
-  for (uint8_t i = 0; i < 4; ++i) {
-    activeDiodeProfileXY[i][0] = xy[i][0];
-    activeDiodeProfileXY[i][1] = xy[i][1];
-    activeDiodeProfileRelY[i] = relY[i];
+  if (format == DIODE_PROFILE_FORMAT_RGBWW) {
+    if (payloadLen < 67) return false;
+
+    float xy[5][2];
+    float relY[5];
+    uint8_t offset = 7;
+    for (uint8_t i = 0; i < 5; ++i) {
+      xy[i][0] = floatFromQ1e6(readU32BE(payload, offset)); offset += 4;
+      xy[i][1] = floatFromQ1e6(readU32BE(payload, offset)); offset += 4;
+      relY[i] = floatFromQ1e6(readU32BE(payload, offset)); offset += 4;
+
+      if (!(xy[i][0] > 0.0f) || !(xy[i][0] < 1.0f)) return false;
+      if (!(xy[i][1] > 0.0f) || !(xy[i][1] < 1.0f)) return false;
+      if ((xy[i][0] + xy[i][1]) >= 1.0f) return false;
+      if (!(relY[i] > 0.0f)) return false;
+    }
+
+    for (uint8_t i = 0; i < 5; ++i) {
+      activeRgbwwProfileXY[i][0] = xy[i][0];
+      activeRgbwwProfileXY[i][1] = xy[i][1];
+      activeRgbwwProfileRelY[i] = relY[i];
+    }
+
+    rebuildRgbwwProfileCache();
+    clearAnalyticalDebug();
+    return true;
   }
 
-  rebuildDiodeProfileCache();
-  clearAnalyticalDebug();
-  return true;
+  return false;
 }
 
-void sendDiodeProfileResponse(uint8_t op, uint8_t status) {
+void sendDiodeProfileResponse(uint8_t op, uint8_t status, uint8_t format) {
+  if (format == DIODE_PROFILE_FORMAT_RGBWW) {
+    // RGBWW profile response:
+    // [op,status,'D','P','R','F',version,format=2, 15x u32be q1e6]
+    // channel order is R,G,B,WW,WC and each channel stores x, y, relative_Y.
+    uint8_t payload[68] = {0};
+    payload[0] = op;
+    payload[1] = status;
+    payload[2] = 'D';
+    payload[3] = 'P';
+    payload[4] = 'R';
+    payload[5] = 'F';
+    payload[6] = 1;  // version
+    payload[7] = DIODE_PROFILE_FORMAT_RGBWW;
+    uint8_t offset = 8;
+
+    const fl::colorimetric_detail::RgbcctProfile* profile =
+      hasActiveRgbwwProfile ? &activeRgbwwProfile : fl::get_rgbww_colorimetric_profile();
+
+    float xy[5][2] = {
+      {profile->warm_path.xy_r[0], profile->warm_path.xy_r[1]},
+      {profile->warm_path.xy_g[0], profile->warm_path.xy_g[1]},
+      {profile->warm_path.xy_b[0], profile->warm_path.xy_b[1]},
+      {profile->warm_path.xy_w[0], profile->warm_path.xy_w[1]},
+      {profile->cool_path.xy_w[0], profile->cool_path.xy_w[1]},
+    };
+    float relY[5] = {
+      profile->warm_path.lum_r,
+      profile->warm_path.lum_g,
+      profile->warm_path.lum_b,
+      profile->warm_path.lum_w,
+      profile->cool_path.lum_w,
+    };
+
+    for (uint8_t i = 0; i < 5; ++i) {
+      writeU32BE(payload, offset, q1e6FromFloat(xy[i][0])); offset += 4;
+      writeU32BE(payload, offset, q1e6FromFloat(xy[i][1])); offset += 4;
+      writeU32BE(payload, offset, q1e6FromFloat(relY[i])); offset += 4;
+    }
+
+    sendFrame(FRAME_KIND_CAL_RSP, payload, sizeof(payload));
+    return;
+  }
+
   // Compact profile response:
   // [op,status,'D','P','R','F',version,format, 12x u32be q1e6]
   // channel order is R,G,B,W and each channel stores x, y, relative_Y.
@@ -391,7 +598,7 @@ void sendDiodeProfileResponse(uint8_t op, uint8_t status) {
   payload[4] = 'R';
   payload[5] = 'F';
   payload[6] = 1;  // version
-  payload[7] = 1;  // format: uint32 big-endian values scaled by 1e6
+  payload[7] = DIODE_PROFILE_FORMAT_RGBW;  // format: uint32 big-endian values scaled by 1e6
   writeU32BE(payload, 8, q1e6FromFloat(activeDiodeProfileXY[0][0]));
   writeU32BE(payload, 12, q1e6FromFloat(activeDiodeProfileXY[0][1]));
   writeU32BE(payload, 16, q1e6FromFloat(activeDiodeProfileRelY[0]));
@@ -613,22 +820,80 @@ bool solveAnalyticalRGB16(uint16_t r16, uint16_t g16, uint16_t b16,
   return true;
 }
 
-bool fillAnalyticalRGB16(uint16_t r16, uint16_t g16, uint16_t b16,
-                         uint8_t model, uint8_t dualEdgePolicy) {
-  analyticalModel = (model == ANALYTICAL_MODEL_LP_LEGACY) ? ANALYTICAL_MODEL_LP_LEGACY : ANALYTICAL_MODEL_SUB_GAMUT;
+uint8_t fillAnalyticalRGB16(uint16_t r16, uint16_t g16, uint16_t b16,
+                            uint8_t model, uint8_t dualEdgePolicy) {
+  analyticalModel = model;
   lastInputR16 = r16;
   lastInputG16 = g16;
   lastInputB16 = b16;
   lastInputW16 = 0;
   lastInputW2_16 = 0;
+
+  if (model == ANALYTICAL_MODEL_RGB_DIRECT_STUB || model == ANALYTICAL_MODEL_RGBWW_STRICT_STUB) {
+    clearAnalyticalDebug();
+    analyticalSolvePath = ANALYTICAL_SOLVE_UNAVAILABLE;
+    lastSolvedR16 = 0;
+    lastSolvedG16 = 0;
+    lastSolvedB16 = 0;
+    lastSolvedW16 = 0;
+    lastSolvedW2_16 = 0;
+    return STATUS_UNSUPPORTED_MODEL;
+  }
+
+  if (model == ANALYTICAL_MODEL_RGBWW_OVERDRIVE) {
+    clearAnalyticalDebug();
+    fl::Rgbww rgbwwCfg(
+      fl::kRGBWWDefaultWarmCct,
+      fl::kRGBWWDefaultCoolCct,
+      fl::RGBWW_MODE::kRGBWWColorimetricBoosted,
+      fl::EOrderWW::WWDefault);
+
+    uint8_t outR = 0;
+    uint8_t outG = 0;
+    uint8_t outB = 0;
+    uint8_t outWw = 0;
+    uint8_t outWc = 0;
+    fl::rgb_2_rgbww(
+      rgbwwCfg,
+      q16ToU8(r16), q16ToU8(g16), q16ToU8(b16),
+      255, 255, 255,
+      &outR, &outG, &outB, &outWw, &outWc);
+
+    const uint16_t solvedR16 = u8ToQ16(outR);
+    const uint16_t solvedG16 = u8ToQ16(outG);
+    const uint16_t solvedB16 = u8ToQ16(outB);
+    const uint16_t solvedW16 = u8ToQ16(outWw);
+    const uint16_t solvedW2_16 = u8ToQ16(outWc);
+
+    lastSolvedR16 = solvedR16;
+    lastSolvedG16 = solvedG16;
+    lastSolvedB16 = solvedB16;
+    lastSolvedW16 = solvedW16;
+    lastSolvedW2_16 = solvedW2_16;
+    analyticalSolvePath = ANALYTICAL_SOLVE_RGBWW_OVERDRIVE;
+
+    return applySolvedOutput16(solvedR16, solvedG16, solvedB16, solvedW16, solvedW2_16)
+      ? STATUS_OK
+      : STATUS_UNSUPPORTED_OUTPUT_MODE;
+  }
+
+  // RGBW strict sub-gamut and LP legacy solver families.
+  const uint8_t rgbwModel = (model == ANALYTICAL_MODEL_RGBW_LP_LEGACY)
+    ? ANALYTICAL_MODEL_RGBW_LP_LEGACY
+    : ANALYTICAL_MODEL_RGBW_STRICT_SUB_GAMUT;
+
   RGBW16Tuple solved;
-  if (!solveAnalyticalRGB16(r16, g16, b16, analyticalModel, dualEdgePolicy, solved)) {
-    return false;
+  if (!solveAnalyticalRGB16(r16, g16, b16, rgbwModel, dualEdgePolicy, solved)) {
+    return STATUS_SOLVE_FAILED;
   }
   if (outputMode == OUTPUT_MODE_RGB) {
-    return applySolvedOutput16(r16, g16, b16, 0, 0);
+    return applySolvedOutput16(r16, g16, b16, 0, 0)
+      ? STATUS_OK
+      : STATUS_UNSUPPORTED_OUTPUT_MODE;
   }
-  return applySolvedOutput16(solved.r, solved.g, solved.b, solved.w, 0);
+  return applySolvedOutput16(solved.r, solved.g, solved.b, solved.w, 0)
+    ? STATUS_OK
+    : STATUS_UNSUPPORTED_OUTPUT_MODE;
 }
 
 bool fillAnalyticalRGBW16(uint16_t r16, uint16_t g16, uint16_t b16, uint16_t w16) {
@@ -779,7 +1044,7 @@ void handleCalFrame(const uint8_t* payload, uint16_t payloadLen) {
       break;
     case OP_SET_ANALYTICAL_RGB16:
       if (payloadLen < 8) status = STATUS_BAD_PAYLOAD;
-      else if (!fillAnalyticalRGB16(readU16(payload, 2), readU16(payload, 4), readU16(payload, 6), payload[1], payloadLen >= 9 ? payload[8] : DUAL_EDGE_POLICY_Y_CORRECT_CLIP)) status = STATUS_SOLVE_FAILED;
+      else status = fillAnalyticalRGB16(readU16(payload, 2), readU16(payload, 4), readU16(payload, 6), payload[1], payloadLen >= 9 ? payload[8] : DUAL_EDGE_POLICY_Y_CORRECT_CLIP);
       break;
     case OP_SET_ANALYTICAL_RGBW16:
       if (payloadLen < 9) status = STATUS_BAD_PAYLOAD;
@@ -790,15 +1055,35 @@ void handleCalFrame(const uint8_t* payload, uint16_t payloadLen) {
       else if (!fillAnalyticalRGBWW16(readU16(payload, 1), readU16(payload, 3), readU16(payload, 5), readU16(payload, 7), readU16(payload, 9))) status = STATUS_UNSUPPORTED_OUTPUT_MODE;
       break;
     case OP_GET_DIODE_PROFILE:
-      sendDiodeProfileResponse(op, STATUS_OK);
+      if (analyticalModel == ANALYTICAL_MODEL_RGB_DIRECT_STUB) {
+        sendDiodeProfileResponse(op, STATUS_UNSUPPORTED_MODEL, DIODE_PROFILE_FORMAT_RGBW);
+      } else {
+        const uint8_t profileFormat = (analyticalModel == ANALYTICAL_MODEL_RGBWW_OVERDRIVE)
+          ? DIODE_PROFILE_FORMAT_RGBWW
+          : DIODE_PROFILE_FORMAT_RGBW;
+        sendDiodeProfileResponse(op, STATUS_OK, profileFormat);
+      }
       return;
     case OP_SET_DIODE_PROFILE:
-      if (!setDiodeProfileFromPayload(payload, payloadLen)) status = STATUS_BAD_PROFILE;
+      if (analyticalModel == ANALYTICAL_MODEL_RGB_DIRECT_STUB) {
+        status = STATUS_UNSUPPORTED_MODEL;
+      } else if (!setDiodeProfileFromPayload(payload, payloadLen)) {
+        status = STATUS_BAD_PROFILE;
+      }
       else {
-        sendDiodeProfileResponse(op, STATUS_OK);
+        const uint8_t responseFormat = payloadLen >= 7 ? payload[6] : DIODE_PROFILE_FORMAT_RGBW;
+        sendDiodeProfileResponse(op, STATUS_OK, responseFormat);
         return;
       }
       break;
+    case OP_GET_INPUT_GAMUT:
+      sendInputGamutResponse(op, STATUS_OK);
+      return;
+    case OP_SET_INPUT_GAMUT:
+      if (payloadLen < 2) status = STATUS_BAD_PAYLOAD;
+      else if (!setInputGamut(payload[1])) status = STATUS_UNSUPPORTED_GAMUT;
+      sendInputGamutResponse(op, status);
+      return;
     case OP_COMMIT:
       break;
     default:
